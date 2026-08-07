@@ -35,8 +35,9 @@ pub const NET_SEL_NONE: u32 = u32::MAX;
 /// network" (menu's "Host-only (vmnet)" entry). All instances selecting this
 /// attach to the same `socket_vmnet --vmnet-mode=host` daemon, sharing a
 /// host-side `bridgeN` interface that vmnet.framework creates. Pure L2,
-/// host-sniffable in Wireshark with no encapsulation, vmnet's built-in DHCP
-/// hands out 192.168.x.y addresses to the guests.
+/// host-sniffable in Wireshark with no encapsulation. The daemon runs with
+/// `--vmnet-network-identifier`, so the segment has no DHCP server: guests
+/// self-assign 169.254/16 link-local via avahi-autoipd, like real gear.
 pub const NET_SEL_VMNET_HOST: u32 = u32::MAX - 1;
 
 /// Token written to `InstanceSettings::net_iface` to persist the vmnet-host

@@ -19,6 +19,22 @@ const BREW_CANDIDATES: &[&str] = &[
     "/opt/homebrew/opt/socket_vmnet/bin/socket_vmnet",
 ];
 
+/// Fixed vmnet network identifier for host-only mode.
+///
+/// Passing `--vmnet-network-identifier=<UUID>` maps to vmnet.framework's
+/// `vmnet_network_identifier_key` (macOS 11+): every interface that shares this
+/// UUID joins one common isolated vmnet network *with no DHCP server*.  Same
+/// UUID -> same L2 segment, so all instances still see each other's broadcast /
+/// unicast (this is not per-guest isolation) - it only drops the built-in
+/// `bootpd` lease service.
+///
+/// With no DHCP, the guest's `link-monitor.sh` `udhcpc -T 2` times out and
+/// falls through to `avahi-autoipd`, self-assigning a 169.254/16 link-local
+/// address - matching real Pro DJ Link gear on a router-less network, which is
+/// what we want to test.  A single constant keeps every instance on the same
+/// segment across restarts.
+const VMNET_HOST_NETWORK_ID: &str = "7b3d5e2a-9c14-4f6b-b2e1-0a1c2d3e4f50";
+
 /// A running socket_vmnet daemon for one QEMU instance.
 ///
 /// Owns its daemon via a root-side watchdog spawned alongside socket_vmnet
@@ -89,11 +105,14 @@ impl SocketVmnet {
 
     /// Start socket_vmnet in host-only mode, or reuse an already-running daemon.
     /// Apple's vmnet.framework creates a host-side bridge interface (e.g.
-    /// `bridge100`) and runs a DHCP server on it (192.168.x.0/24 by default).
-    /// All QEMU instances connecting to this socket share the same L2 fabric
-    /// and see each other via standard broadcast / unicast - and the host
-    /// bridge interface is sniffable in Wireshark / tcpdump with no
-    /// encapsulation, which is the reason this mode exists.
+    /// `bridge100`); all QEMU instances connecting to this socket share the same
+    /// L2 fabric and see each other via standard broadcast / unicast, with no
+    /// physical interface bridged - that shared, NIC-less segment is the reason
+    /// this mode exists.
+    ///
+    /// We pass `--vmnet-network-identifier` (see [`VMNET_HOST_NETWORK_ID`]) so
+    /// the segment carries **no DHCP server**: guests fall through to
+    /// avahi-autoipd link-local (169.254/16), matching real Pro DJ Link gear.
     pub fn start_host() -> io::Result<Self> {
         cdj3k_emu_platform::runtime_paths::ensure_djpl_net_dir()?;
         let socket_path = socket_path_for("host");
@@ -228,24 +247,69 @@ fn launch_elevated(bin: &str, iface: Option<&str>, socket_path: &Path) -> io::Re
     //
     // `iface = Some(name)` selects bridged mode on that physical interface;
     // `iface = None` selects host-only mode (Apple creates a fresh `bridge*`
-    // for the isolated network).
+    // for the isolated network), with `--vmnet-network-identifier` to suppress
+    // the built-in DHCP server (see `VMNET_HOST_NETWORK_ID`).
+    //
+    // vmnet.framework ignores `--vmnet-gateway`/`--vmnet-mask` once a network
+    // identifier is set (it picks its own random 192.168.x.1/24 for the host
+    // bridge), so we can't ask socket_vmnet to put the host on link-local.
+    // Instead, host-only injects `addr_block`: still inside this one elevated
+    // shell (no extra password prompt), it waits for the bridge to appear,
+    // deletes vmnet's random primary, and hands the interface to macOS's
+    // IPConfiguration agent in DHCP mode.  With no DHCP server on the segment
+    // (the network identifier suppresses vmnet's bootpd), IPConfiguration falls
+    // through to its IPv4LL "self-assigned IP" path and picks a 169.254.x - the
+    // host analog of the guest's `avahi-autoipd`.  So the host *decides* its own
+    // link-local address (nothing attributed), IPConfiguration owns it as the
+    // interface's single address, and host + guests share one non-DHCP
+    // link-local /16.  BR_BEFORE is captured before launch so we can identify
+    // *our* freshly-created bridge.
+    //
+    // Trade-off: IPConfiguration waits out its DHCP timeout (~16 s observed)
+    // before self-assigning, so the host is not reachable at L3 for that window.
+    // It runs in the backgrounded watchdog subshell, so it never blocks startup,
+    // and L2 sniffing (Wireshark) needs no address and is unaffected.
     let bin_q = sh_quote(bin);
-    let mode_args = match iface {
-        Some(name) => format!(
-            "--vmnet-mode bridged --vmnet-interface {}",
-            sh_quote(name)
+    let (mode_args, addr_block) = match iface {
+        Some(name) => (
+            format!("--vmnet-mode bridged --vmnet-interface {}", sh_quote(name)),
+            String::new(),
         ),
-        None => "--vmnet-mode host".to_string(),
+        None => (
+            format!("--vmnet-mode host --vmnet-network-identifier {VMNET_HOST_NETWORK_ID}"),
+            r#"  br=""
+  j=0
+  while [ $j -lt 40 ]; do
+    for b in $(ifconfig -l | tr ' ' '\n' | grep '^bridge'); do
+      case " $BR_BEFORE " in
+        *" $b "*) : ;;
+        *) br="$b"; break ;;
+      esac
+    done
+    [ -n "$br" ] && break
+    sleep 0.25; j=$((j+1))
+  done
+  if [ -n "$br" ]; then
+    for a in $(ifconfig "$br" | awk '/inet /{print $2}'); do
+      ifconfig "$br" inet "$a" delete 2>/dev/null
+    done
+    ipconfig set "$br" DHCP 2>/dev/null
+  fi
+"#
+            .to_string(),
+        ),
     };
     let sock_q = sh_quote(&socket_path.to_string_lossy());
     let parent_pid = std::process::id();
     let cmd = format!(
-        r#"nohup {bin} {mode_args} {sock} >/dev/null 2>&1 &
+        r#"BR_BEFORE=$(ifconfig -l | tr ' ' '\n' | grep '^bridge' | tr '\n' ' ')
+nohup {bin} {mode_args} {sock} >/dev/null 2>&1 &
 SV_PID=$!
 ( trap '' HUP
   i=0
   while [ $i -lt 40 ] && [ ! -S {sock} ]; do sleep 0.1; i=$((i+1)); done
-  while kill -0 {ppid} 2>/dev/null && [ -S {sock} ]; do sleep 1; done
+{addr_block}  while kill -0 {ppid} 2>/dev/null && [ -S {sock} ]; do sleep 1; done
+  [ -n "$br" ] && ipconfig set "$br" NONE 2>/dev/null
   kill "$SV_PID" 2>/dev/null
   sleep 0.3
   kill -9 "$SV_PID" 2>/dev/null
@@ -254,6 +318,7 @@ SV_PID=$!
 "#,
         bin = bin_q,
         mode_args = mode_args,
+        addr_block = addr_block,
         sock = sock_q,
         ppid = parent_pid,
     );
