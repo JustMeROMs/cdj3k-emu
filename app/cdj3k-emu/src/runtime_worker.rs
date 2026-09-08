@@ -45,9 +45,11 @@ fn run(mut instance: Option<QemuInstance>, mut config: QemuConfig, prebuilt_net:
     // Network backends: own them here so Drop fires on app exit (worker breaks
     // out of the loop, function returns, locals drop) and on iface change
     // (`= None;` drops the previous Some).  TapBridge::Drop tears down the
-    // host TAP; SocketVmnet::Drop unlinks the socket file, which is the
-    // signal to the root-side watchdog (spawned alongside socket_vmnet) to
-    // reap the daemon - the user-level process can't kill it directly.
+    // host TAP; SocketVmnet::Drop releases this instance's lease on the
+    // shared daemon, whose root-side watchdog (spawned alongside socket_vmnet)
+    // reaps it once no lease is live - the user-level process can't kill it
+    // directly.  Sockets and directories are removed in one place only:
+    // `cleanup_runtime_files` on process exit.
     #[allow(unused_assignments)]
     let mut _active_tap_bridge: Option<TapBridge> = prebuilt_net.tap_bridge;
     #[allow(unused_assignments)]

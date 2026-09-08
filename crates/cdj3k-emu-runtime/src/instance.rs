@@ -365,12 +365,53 @@ fn kill_stale(qmp_port: u16, sock_dir: &Path) {
 /// signal handler, atexit) without needing to thread state through the UI.
 pub static SHUTDOWN_SOCK_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
 
-/// Wipe the sock dir registered via `SHUTDOWN_SOCK_DIR`. No-op if unset.
-/// Safe to call repeatedly - `cleanup_qemu_files` is idempotent.
+/// THE shutdown cleanup, and the only place that decides "last one out".
+/// Reached from every exit path (eframe on_exit, signal handler, atexit).
+///
+/// 1. Wipe this instance's sock dir registered via `SHUTDOWN_SOCK_DIR`.
+/// 2. Drop this process's socket_vmnet leases; where no live lease remains,
+///    take the daemon's socket and `<sock>.clients/` with them.
+/// 3. Remove the per-UID runtime dir and the DJPL net dir once they are
+///    empty (another slot's `instance-N` or another interface's socket keeps
+///    them).
+///
+/// Everything is idempotent and best-effort - safe to call repeatedly, and
+/// safe when nothing exists any more.
 pub fn cleanup_runtime_files() {
     if let Some(dir) = SHUTDOWN_SOCK_DIR.get() {
         cleanup_qemu_files(dir);
     }
+    prune_shared_dirs(
+        &cdj3k_emu_platform::runtime_paths::runtime_base_dir(),
+        &cdj3k_emu_platform::runtime_paths::djpl_net_dir(),
+        std::process::id(),
+    );
+}
+
+/// Steps 2 and 3 of [`cleanup_runtime_files`], on explicit paths so a test can
+/// point them at a scratch tree.  `remove_dir` (non-recursive) is the
+/// "am I the last one" check for both trees: it fails, harmlessly, while
+/// anything else is still inside.
+fn prune_shared_dirs(base_dir: &Path, net_dir: &Path, own_pid: u32) {
+    if let Ok(entries) = std::fs::read_dir(net_dir) {
+        for entry in entries.flatten() {
+            let leases = entry.path();
+            let Some(name) = leases.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            let Some(sock_name) = name.strip_suffix(".clients") else {
+                continue;
+            };
+            let own = leases.join(own_pid.to_string());
+            let _ = std::fs::remove_file(&own);
+            if !crate::vmnet::other_clients_alive(&leases, &own) {
+                let _ = std::fs::remove_file(net_dir.join(sock_name));
+                let _ = std::fs::remove_dir_all(&leases);
+            }
+        }
+    }
+    let _ = std::fs::remove_dir(net_dir);
+    let _ = std::fs::remove_dir(base_dir);
 }
 
 /// Remove the sock dir and everything inside it, plus the sibling ram.shm.
@@ -414,5 +455,41 @@ fn cleanup_qemu_files_inner(sock_dir: &Path, keep_vmnet: bool) {
     }
     if !keep_vmnet {
         let _ = std::fs::remove_dir(sock_dir);
+    }
+}
+
+#[cfg(test)]
+mod prune_tests {
+    use super::prune_shared_dirs;
+
+    /// With another live lease the socket, its lease dir and both trees stay;
+    /// as the last one out everything goes.
+    #[test]
+    fn prune_shared_dirs_removes_trees_only_when_last() {
+        let root = std::env::temp_dir().join(format!("cdj3k-prune-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let base = root.join("cdj3k-emu");
+        let net = root.join("djpl");
+        let sock = net.join("vmnet-host.sock");
+        let leases = net.join("vmnet-host.sock.clients");
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::create_dir_all(&leases).unwrap();
+        std::fs::write(&sock, "").unwrap();
+        let own = leases.join(std::process::id().to_string());
+        std::fs::write(&own, "").unwrap();
+        let other = leases.join("1"); // launchd: alive, owned by root
+        std::fs::write(&other, "").unwrap();
+
+        prune_shared_dirs(&base, &net, std::process::id());
+        assert!(!own.exists(), "own lease released");
+        assert!(sock.exists() && leases.exists() && net.exists(), "another live lease keeps the daemon");
+        assert!(!base.exists(), "empty runtime base dir goes regardless");
+
+        std::fs::remove_file(&other).unwrap();
+        std::fs::create_dir_all(&base).unwrap();
+        prune_shared_dirs(&base, &net, std::process::id());
+        assert!(!sock.exists() && !leases.exists() && !net.exists(), "last one out takes the DJPL tree");
+        assert!(!base.exists());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

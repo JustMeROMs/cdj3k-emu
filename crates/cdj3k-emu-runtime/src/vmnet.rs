@@ -35,22 +35,71 @@ const BREW_CANDIDATES: &[&str] = &[
 /// segment across restarts.
 const VMNET_HOST_NETWORK_ID: &str = "7b3d5e2a-9c14-4f6b-b2e1-0a1c2d3e4f50";
 
-/// A running socket_vmnet daemon for one QEMU instance.
+/// One QEMU instance's hold on a shared socket_vmnet daemon.
 ///
-/// Owns its daemon via a root-side watchdog spawned alongside socket_vmnet
-/// (see `launch_elevated`).  The watchdog reaps the daemon when either:
-///   - the cdj3k-emu PID exits (handles SIGKILL / crash / normal quit), or
-///   - the socket file is unlinked (how `stop()` / `Drop` request shutdown).
+/// The daemon is shared by every instance on the same interface, so no single
+/// instance owns it.  Each handle holds a **lease**: a file named after its
+/// PID under `<sock>.clients/` (see [`lease_dir`]).  The root-side watchdog
+/// spawned alongside socket_vmnet (see `launch_elevated`) keeps the daemon
+/// alive while any lease names a live PID, and reaps it when either:
+///   - no lease is live any more (every instance exited, crashed or was
+///     SIGKILLed - a dead PID's lease is swept by the watchdog itself), or
+///   - the socket file is unlinked (the process-exit cleanup, when it finds
+///     itself the last client).
 ///
 /// We can't kill the daemon directly because it runs as root and the host
 /// app runs as the user, but the user *can* unlink the socket (parent dir
-/// is user-owned), which the watchdog uses as a shutdown signal.
+/// is user-owned), which the watchdog uses as a shutdown signal.  The
+/// lease is written BEFORE the socket is probed or the daemon launched, so
+/// the watchdog never observes a window with a live daemon and no client.
+///
+/// PID reuse: a crashed instance leaves a lease behind until the watchdog's
+/// next `kill -0` sees the PID dead; if another process takes that PID first,
+/// the daemon lingers until it exits.  Clean exits remove their lease.
 pub struct SocketVmnet {
     socket_path: PathBuf,
-    /// True when this handle started the daemon (and the watchdog).  False
-    /// when we attached to a pre-existing daemon - in that case `Drop` must
-    /// not unlink the socket out from under whoever else is using it.
-    owns_daemon: bool,
+    /// This instance's lease file.
+    lease: PathBuf,
+}
+
+/// `<sock>.clients/` - one file per attached instance, named by PID.  Lives
+/// next to the socket in the user-owned DJPL net dir so a djx-emu instance
+/// attaching to the same daemon can hold a lease the same way.
+fn lease_dir(socket_path: &Path) -> PathBuf {
+    let mut name = socket_path.as_os_str().to_owned();
+    name.push(".clients");
+    PathBuf::from(name)
+}
+
+/// True if any lease other than `own` names a live process.  Dead PIDs' leases
+/// are removed on the way (same sweep the root watchdog does).
+pub(crate) fn other_clients_alive(dir: &Path, own: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    let mut alive = false;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path == own {
+            continue;
+        }
+        let pid = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.parse::<libc::pid_t>().ok());
+        // SAFETY: signal 0 performs only the existence/permission check.
+        // EPERM means the PID exists but belongs to another user - alive.
+        let exists = pid.is_some_and(|pid| {
+            let rc = unsafe { libc::kill(pid, 0) };
+            rc == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+        });
+        if exists {
+            alive = true;
+        } else {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+    alive
 }
 
 /// Validate an interface name before letting it reach a root-elevated shell
@@ -77,30 +126,7 @@ impl SocketVmnet {
                 format!("invalid interface name: {iface:?}"),
             ));
         }
-        cdj3k_emu_platform::runtime_paths::ensure_djpl_net_dir()?;
-        let socket_path = socket_path_for(iface);
-
-        // If the daemon is already live, reuse it - no elevation, no restart.
-        // We didn't spawn it, so we don't own it: Drop won't unlink the socket.
-        if socket_accepts(&socket_path) {
-            return Ok(Self {
-                socket_path,
-                owns_daemon: false,
-            });
-        }
-
-        // Stale socket file without a live daemon behind it.
-        if socket_path.exists() {
-            let _ = std::fs::remove_file(&socket_path);
-        }
-
-        let bin = find_binary()?;
-        launch_elevated(&bin, Some(iface), &socket_path)?;
-
-        Ok(Self {
-            socket_path,
-            owns_daemon: true,
-        })
+        Self::acquire(socket_path_for(iface), Some(iface))
     }
 
     /// Start socket_vmnet in host-only mode, or reuse an already-running daemon.
@@ -114,45 +140,56 @@ impl SocketVmnet {
     /// the segment carries **no DHCP server**: guests fall through to
     /// avahi-autoipd link-local (169.254/16), matching real Pro DJ Link gear.
     pub fn start_host() -> io::Result<Self> {
-        cdj3k_emu_platform::runtime_paths::ensure_djpl_net_dir()?;
-        let socket_path = socket_path_for("host");
+        Self::acquire(socket_path_for("host"), None)
+    }
 
-        if socket_accepts(&socket_path) {
-            return Ok(Self {
-                socket_path,
-                owns_daemon: false,
-            });
+    /// Take a lease on `socket_path`, then attach to the daemon behind it or
+    /// launch one.  `iface` is `None` for host-only mode.
+    ///
+    /// The lease goes down first: if the daemon is already live its watchdog
+    /// counts us from this moment, and if we launch it ourselves the watchdog
+    /// starts with one live client.  Shows the native macOS admin dialog only
+    /// when a new daemon must be started.
+    fn acquire(socket_path: PathBuf, iface: Option<&str>) -> io::Result<Self> {
+        cdj3k_emu_platform::runtime_paths::ensure_djpl_net_dir()?;
+        let leases = lease_dir(&socket_path);
+        std::fs::create_dir_all(&leases)?;
+        let lease = leases.join(std::process::id().to_string());
+        std::fs::write(&lease, format!("{}\n", std::process::id()))?;
+        let this = Self { socket_path, lease };
+
+        // If the daemon is already live, reuse it - no elevation, no restart.
+        if socket_accepts(&this.socket_path) {
+            return Ok(this);
         }
-        if socket_path.exists() {
-            let _ = std::fs::remove_file(&socket_path);
+
+        // Stale socket file without a live daemon behind it.
+        if this.socket_path.exists() {
+            let _ = std::fs::remove_file(&this.socket_path);
         }
 
         let bin = find_binary()?;
-        launch_elevated(&bin, None, &socket_path)?;
-
-        Ok(Self {
-            socket_path,
-            owns_daemon: true,
-        })
+        // A failed launch drops `this`, which releases the lease.
+        launch_elevated(&bin, iface, &this.socket_path, &leases)?;
+        Ok(this)
     }
 
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
     }
 
-    /// Signal the root-side watchdog to reap socket_vmnet by unlinking the
-    /// socket file.  Returns immediately; the daemon dies shortly after on
-    /// the watchdog's next poll.  Safe to call multiple times.
+    /// Release this instance's lease.  Nothing else: if it was the last one
+    /// the root-side watchdog reaps socket_vmnet on its next poll, and the
+    /// process-exit handler (`instance::cleanup_runtime_files`) is the one
+    /// place that removes sockets and directories.  Safe to call repeatedly.
     pub fn stop(&self) {
-        let _ = std::fs::remove_file(&self.socket_path);
+        let _ = std::fs::remove_file(&self.lease);
     }
 }
 
 impl Drop for SocketVmnet {
     fn drop(&mut self) {
-        if self.owns_daemon {
-            self.stop();
-        }
+        self.stop();
     }
 }
 
@@ -232,14 +269,23 @@ fn find_binary() -> io::Result<String> {
     ))
 }
 
-fn launch_elevated(bin: &str, iface: Option<&str>, socket_path: &Path) -> io::Result<()> {
+fn launch_elevated(
+    bin: &str,
+    iface: Option<&str>,
+    socket_path: &Path,
+    leases: &Path,
+) -> io::Result<()> {
     // The elevated shell does two things, both backgrounded:
     //   1. Spawn socket_vmnet itself.
-    //   2. Spawn a watchdog subshell that polls the cdj3k-emu PID and the
-    //      socket file presence; when either goes away it kills the daemon
-    //      and unlinks the socket.  The watchdog inherits root from this
-    //      elevated shell, so it actually has permission to SIGTERM the
-    //      daemon - something the user-level host process never could.
+    //   2. Spawn a watchdog subshell that polls the lease files under
+    //      `leases` (one per attached instance, named by PID - see
+    //      `SocketVmnet`) and the socket file presence; when no lease names
+    //      a live PID, or the socket is gone, it kills the daemon and unlinks
+    //      the socket.  A lease whose PID is dead is swept on the spot, so a
+    //      crashed instance never pins the daemon.  The watchdog inherits
+    //      root from this elevated shell, so it actually has permission to
+    //      SIGTERM the daemon - something the user-level host process never
+    //      could.
     //
     // The watchdog also outlives this shell: `( ... ) &` forks a subshell,
     // and AuthorizationExecuteWithPrivileges spawns us without a controlling
@@ -300,7 +346,7 @@ fn launch_elevated(bin: &str, iface: Option<&str>, socket_path: &Path) -> io::Re
         ),
     };
     let sock_q = sh_quote(&socket_path.to_string_lossy());
-    let parent_pid = std::process::id();
+    let leases_q = sh_quote(&leases.to_string_lossy());
     let cmd = format!(
         r#"BR_BEFORE=$(ifconfig -l | tr ' ' '\n' | grep '^bridge' | tr '\n' ' ')
 nohup {bin} {mode_args} {sock} >/dev/null 2>&1 &
@@ -308,7 +354,15 @@ SV_PID=$!
 ( trap '' HUP
   i=0
   while [ $i -lt 40 ] && [ ! -S {sock} ]; do sleep 0.1; i=$((i+1)); done
-{addr_block}  while kill -0 {ppid} 2>/dev/null && [ -S {sock} ]; do sleep 1; done
+{addr_block}  while [ -S {sock} ]; do
+    live=0
+    for l in {leases}/*; do
+      [ -e "$l" ] || continue
+      if kill -0 "$(basename "$l")" 2>/dev/null; then live=1; else rm -f "$l"; fi
+    done
+    [ "$live" -eq 1 ] || break
+    sleep 1
+  done
   [ -n "$br" ] && ipconfig set "$br" NONE 2>/dev/null
   kill "$SV_PID" 2>/dev/null
   sleep 0.3
@@ -320,7 +374,7 @@ SV_PID=$!
         mode_args = mode_args,
         addr_block = addr_block,
         sock = sock_q,
-        ppid = parent_pid,
+        leases = leases_q,
     );
     run_elevated(&cmd)?;
 
@@ -426,4 +480,44 @@ pub fn run_elevated(sh_cmd: &str) -> io::Result<()> {
 /// Wrap a string in single quotes for /bin/sh, escaping any embedded `'`.
 pub fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lease_dir_sits_next_to_the_socket() {
+        let d = lease_dir(Path::new("/tmp/djpl-501/vmnet-host.sock"));
+        assert_eq!(d, PathBuf::from("/tmp/djpl-501/vmnet-host.sock.clients"));
+    }
+
+    /// A live PID's lease counts; a dead PID's lease is swept; our own lease
+    /// never counts as "other".
+    #[test]
+    fn other_clients_alive_counts_live_pids_and_sweeps_dead_ones() {
+        let dir = std::env::temp_dir().join(format!("cdj3k-lease-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let own = dir.join(std::process::id().to_string());
+        std::fs::write(&own, "").unwrap();
+
+        // Only our own lease: nobody else.
+        assert!(!other_clients_alive(&dir, &own));
+
+        // A lease for a PID that cannot exist (pid_t max on macOS is 99998).
+        let dead = dir.join("999999");
+        std::fs::write(&dead, "").unwrap();
+        assert!(!other_clients_alive(&dir, &own));
+        assert!(!dead.exists(), "dead lease must be swept");
+
+        // A lease for a live process (pid 1, launchd: alive, and owned by
+        // root, so kill(1, 0) answers EPERM rather than 0).
+        let live = dir.join("1");
+        std::fs::write(&live, "").unwrap();
+        assert!(other_clients_alive(&dir, &own));
+        assert!(live.exists(), "live lease must be kept");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
