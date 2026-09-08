@@ -140,6 +140,8 @@ fn run(mut instance: Option<QemuInstance>, mut config: QemuConfig, prebuilt_net:
                 alc_enabled: s.alc_enabled,
                 haptic_toggle: std::mem::take(&mut s.haptic_toggle_requested),
                 haptic_enabled: s.haptic_enabled,
+                mods_toggle: std::mem::take(&mut s.mods_toggle_requested),
+                mods_enabled: s.mods_enabled,
                 selected_iface: s.selected_interface,
                 usb_virtual_img: s.usb_virtual_img.clone(),
             }
@@ -182,6 +184,15 @@ fn run(mut instance: Option<QemuInstance>, mut config: QemuConfig, prebuilt_net:
             if let Err(e) = settings.save(config.instance_id) {
                 eprintln!("cdj3k-emu: persisting audio_enabled failed: {e}");
             }
+            restart_pending = true;
+        }
+
+        // ── EP122 Mods toggle ────────────────────────────────────────────────
+        // Persist; the menu handler already armed a restart so QEMU comes
+        // back with the new kernel cmdline (apply_menu_to_config copies
+        // menu_state -> config on respawn).
+        if req.mods_toggle {
+            persist_inst(config.instance_id, |s| s.mods_enabled = req.mods_enabled);
             restart_pending = true;
         }
 
@@ -548,6 +559,8 @@ struct Requests {
     alc_enabled: bool,
     haptic_toggle: bool,
     haptic_enabled: bool,
+    mods_toggle: bool,
+    mods_enabled: bool,
     selected_iface: u32,
     usb_virtual_img: Option<std::path::PathBuf>,
 }
@@ -555,6 +568,7 @@ struct Requests {
 fn apply_menu_to_config(config: &mut QemuConfig) {
     let s = menu_state::lock();
     config.service_mode = s.service_mode;
+    config.mods_enabled = s.mods_enabled;
     config.audio = s.audio_enabled;
     config.audio_device_uid = s.audio_device_uid.clone();
 }
