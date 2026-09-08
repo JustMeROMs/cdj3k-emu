@@ -21,13 +21,18 @@ real LAN visibility on macOS we use either `vmnet.framework` (via
 
 ---
 
-## Three modes
+## Four modes
 
 | Mode             | QEMU netdev                                                                                       | L2 reach           | Needs root | Cleanup mechanism      |
 | ---------------- | ------------------------------------------------------------------------------------------------- | ------------------ | ---------- | ---------------------- |
 | **User-mode**    | `user,id=net0,hostfwd=tcp::<2222+id>-:22`                                                         | NAT only           | no         | n/a                    |
 | **vmnet-bridged**| `stream,id=net0,server=off,addr.type=unix,addr.path=<sock>`                                       | full L2 on iface   | yes        | watchdog unlinks sock  |
+| **vmnet-host** (link-local) | same `stream` netdev, one shared `socket_vmnet --vmnet-mode host` daemon                | shared `bridgeN`, no NIC | yes  | watchdog unlinks sock  |
 | **TAP bridge**   | `tap,id=net0,fd=<N>`                                                                              | full L2 via TAP    | yes        | heartbeat-file watcher |
+
+**vmnet-host** ("Host-only (link-local)") puts all instances on the same virtual `bridgeN`,
+isolated from physical interfaces. The daemon uses a fixed `--vmnet-network-identifier` (see `vmnet.rs`, `VMNET_HOST_NETWORK_ID`),
+without DHCP, and guests self-assign 169.254/16 via `avahi-autoipd`. Host also self-assigns a 169.254 address; no L3 (host) access during DHCP timeout (~16s), but L2 (broadcast) is unaffected.
 
 Selection logic lives in `crates/cdj3k-emu-runtime/src/config.rs:274-298`:
 TAP fd wins if present, otherwise the vmnet socket path wins, otherwise
