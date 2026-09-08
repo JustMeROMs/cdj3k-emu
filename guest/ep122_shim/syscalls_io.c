@@ -5,7 +5,8 @@
  * handler; everything else falls through to the real libc ioctl.
  */
 
- #include "ep122_shim.h"
+#include "ep122_shim.h"
+#include "mods/core/cdj3k_mods.h"
 
 int ioctl(int fd, unsigned long request, ...) {
     va_list ap; va_start(ap, request);
@@ -139,5 +140,8 @@ ssize_t write(int fd, const void *buf, size_t count) {
         (void)buf;
         return (ssize_t)count;
     }
+    /* The caller, not just the fact. A return address is what turns "the
+     * library file changed" into "this code changed it". */
+    db_watch_write(fd, count, (uintptr_t)__builtin_return_address(0));
     return sys_write(fd, buf, count);
 }

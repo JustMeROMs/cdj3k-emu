@@ -7,14 +7,16 @@
 #   Image              - kernel image (PL011 console, virtio built-in)
 #   modules/           - out-of-tree kernel modules (.ko)
 #   ep122_shim.so      - LD_PRELOAD shim (glibc 2.17-compatible)
-#   subucom_forwarder_aarch64  subucom_live_aarch64  cfgd_aarch64 - static tools
+#   subucom_forwarder_aarch64  subucom_live_aarch64  cfgd_aarch64
+#   stemd_client_aarch64 - static tools
 #   dummy_drv.so       - Xorg Video Driver ABI 24.0 for headless mode
 #
 # Single source of truth for guest user-space build flags is `guest/Makefile`.
 # Two stages invoke it with different toolchains:
-#   builder       (alpine, musl gcc)  → static tools (subucom_*, cfgd) + kernel + modules
-#   shim-builder  (ubuntu, glibc gcc) → ep122_shim.so (must be glibc-linked
-#                                       for LD_PRELOAD into EP122)
+#   builder       (alpine, musl gcc)  → static tools (subucom_*, cfgd, ...) + kernel + modules
+#   shim-builder  (ubuntu, glibc gcc) → ep122_shim.so + the cdj3k-mods it links
+#                                       (must be glibc-linked for LD_PRELOAD
+#                                       into EP122; gated by `make abi-check`)
 
 FROM arm64v8/alpine:3.19 AS builder
 
@@ -122,6 +124,7 @@ RUN mkdir -p /out/modules && \
     cp /tmp/guest/out/subucom_forwarder_aarch64                      /out/ && \
     cp /tmp/guest/out/subucom_live_aarch64                           /out/ && \
     cp /tmp/guest/out/cfgd_aarch64                                   /out/ && \
+    cp /tmp/guest/out/stemd_client_aarch64                           /out/ && \
     echo "=== /out/ ===" && ls -la /out/ && echo "=== /out/modules/ ===" && ls -la /out/modules/
 
 # ep122_shim.so — built against glibc 2.27 (Ubuntu 18.04) so it can
@@ -132,10 +135,19 @@ RUN mkdir -p /out/modules && \
 # object file`. Same Makefile, different toolchain.
 FROM ubuntu:18.04 AS shim-builder
 RUN apt-get update -qq && \
-    apt-get install -y --no-install-recommends gcc libc6-dev make file && \
+    apt-get install -y --no-install-recommends gcc g++ libc6-dev make file binutils && \
     rm -rf /var/lib/apt/lists/*
 COPY guest/ /tmp/guest/
-RUN make -C /tmp/guest CC=gcc shim
+# Stamped in from the host: .dockerignore keeps .git out of the build context.
+# Declared after the COPY so a new commit re-runs only `make shim`.
+ARG MOD_VERSION=unknown
+ARG MOD_BUILD=unknown
+RUN make -C /tmp/guest CC=gcc MOD_VERSION="$MOD_VERSION" MOD_BUILD="$MOD_BUILD" shim
+# The object is LD_PRELOADed into every process apl_start.sh starts. abi-check
+# asserts the glibc 2.17 ceiling, the libc flavour and that every NEEDED library
+# exists on the deck; failing any of them boots the deck with no application.
+# Last place with a real toolchain before the object reaches a deck.
+RUN make -C /tmp/guest CC=gcc abi-check
 
 FROM scratch AS artifacts
 COPY --from=builder      /out/                         /

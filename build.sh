@@ -11,8 +11,9 @@
 #   subucom_virt.ko    - virtual /dev/subucom_spi1.0
 #   virtio_snd.ko      - custom virtio-sound PCM
 #   dummy_drv.so       - Xorg dummy video driver (headless mode)
-#   ep122_shim.so      - LD_PRELOAD shim for EP122
+#   ep122_shim.so      - LD_PRELOAD shim for EP122 (+ the cdj3k-mods it links)
 #   subucom_forwarder_aarch64 / subucom_live_aarch64 / cfgd_aarch64
+#   stemd_client_aarch64
 #
 # Outputs:
 #   build/Image
@@ -51,6 +52,24 @@ done
 export ENABLE_SSH
 
 DOCKER_OUT="$REPO_ROOT/build/docker-out"
+# Persistent BuildKit cache on disk. OrbStack's default builder cache is too
+# small for the kernel compile tree, so GC evicts layers between runs even
+# with an unchanged Dockerfile. mode=max keeps intermediate layers, not just
+# the tiny scratch export stage. Requires a docker-container buildx builder
+# (see docker/ensure-buildx-builder.sh) - the default "docker" driver cannot
+# --cache-to type=local.
+DOCKER_CACHE="$REPO_ROOT/build/docker-cache"
+DOCKER_BUILDER="$("$REPO_ROOT/docker/ensure-buildx-builder.sh")"
+# Version stamp the mods report in MOD SETTINGS. .dockerignore keeps .git out
+# of the build context, so the values are computed here and passed in; the
+# same expressions live in guest/Makefile for a direct `make -C guest docker`.
+MOD_BUILD="$(git -C "$REPO_ROOT" describe --tags --always --dirty 2>/dev/null || echo unknown)"
+MOD_TAG="$(git -C "$REPO_ROOT" describe --tags --abbrev=0 2>/dev/null || true)"
+if [[ -n "$MOD_TAG" ]]; then
+    MOD_VERSION="$MOD_TAG"; [[ "$MOD_TAG" == "$MOD_BUILD" ]] || MOD_VERSION="$MOD_TAG+"
+else
+    MOD_VERSION="unknown"
+fi
 WORKDIR="$REPO_ROOT/build/work"
 ROOTFS_DIR="$WORKDIR/rootfs"
 ROOTFS_MODULES="$ROOTFS_DIR/lib/modules"
@@ -70,9 +89,16 @@ fi
 # [1/5] Build kernel + modules + tools via Docker
 echo "[1/5] Building artifacts (docker/Dockerfile - target artifacts)..."
 rm -rf "$DOCKER_OUT"
+mkdir -p "$DOCKER_CACHE"
 docker buildx build \
+    --builder "$DOCKER_BUILDER" \
     --platform linux/arm64 \
+    --provenance=false \
     --target artifacts \
+    --cache-from "type=local,src=$DOCKER_CACHE" \
+    --cache-to "type=local,dest=$DOCKER_CACHE,mode=max" \
+    --build-arg "MOD_VERSION=$MOD_VERSION" \
+    --build-arg "MOD_BUILD=$MOD_BUILD" \
     --output "type=local,dest=$DOCKER_OUT" \
     -f "$REPO_ROOT/docker/Dockerfile" \
     "$REPO_ROOT"
@@ -118,14 +144,23 @@ for tool in \
     chmod 755 "$ROOTFS_DIR/$dst"
 done
 
+# The STEMS sidecar, at the path 30-stemd-client.sh's unit execs (the .app
+# provisioner installs it from Contents/Resources/tools/ under the same name).
+cp "$DOCKER_OUT/stemd_client_aarch64" "$ROOTFS_DIR/usr/bin/stemd_client"
+chmod 755 "$ROOTFS_DIR/usr/bin/stemd_client"
+
 mkdir -p "$ROOTFS_DIR/home/root"
 cp "$DOCKER_OUT/ep122_shim.so" "$ROOTFS_DIR/home/root/ep122_shim.so"
 chmod 755 "$ROOTFS_DIR/home/root/ep122_shim.so"
 
 # Save tools to guest/out/ for bundle.sh
 mkdir -p "$REPO_ROOT/guest/out"
-for bin in ep122_shim.so subucom_forwarder_aarch64 subucom_live_aarch64 cfgd_aarch64; do
-    cp "$DOCKER_OUT/$bin" "$REPO_ROOT/guest/out/$bin" 2>/dev/null || true
+# Every one of these is required: bundle.sh refuses a bundle without cfgd,
+# and the patch scripts abort the rootfs provision when a tool they install
+# is missing - long after a silently incomplete build looked fine here.
+for bin in ep122_shim.so subucom_forwarder_aarch64 subucom_live_aarch64 cfgd_aarch64 \
+           stemd_client_aarch64; do
+    cp "$DOCKER_OUT/$bin" "$REPO_ROOT/guest/out/$bin"
 done
 
 USB_IMG_SRC="$REPO_ROOT/build/usb.img"
