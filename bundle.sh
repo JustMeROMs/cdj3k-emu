@@ -5,6 +5,7 @@
 # Usage:
 #   ./bundle.sh [--debug] [--no-build] [--out DIR] [--sign IDENTITY] [--dmg]
 #               [--version VERSION] [--build BUILD]
+#               [--notarize] [--notary-profile NAME]
 #
 #   --debug          build debug profile (default: release)
 #   --no-build       skip cargo build; reuse last build output
@@ -14,15 +15,25 @@
 #                    Falls back to ad-hoc (-) when omitted - TCC/FDA will not work.
 #   --dmg            after bundling, package the .app into a compressed .dmg
 #                    image alongside it (matches CFBundleShortVersionString).
-#   --version VER    CFBundleShortVersionString to embed (default: 0.1.0).
+#   --version VER    CFBundleShortVersionString to embed (default: 0.1.2).
 #                    Also names the DMG: CDJ3K-Emulator-<VER>.dmg.
 #   --build N        CFBundleVersion build number (default: 1).
+#   --notarize       after signing with a "Developer ID Application" identity,
+#                    submit the .app (and the .dmg, with --dmg) to Apple's notary
+#                    service, wait for the verdict and staple the tickets.  Needs
+#                    credentials stored once with
+#                      xcrun notarytool store-credentials <NAME> \
+#                          --apple-id <APPLE_ID> --team-id <TEAM_ID>
+#                    (prompts for an app-specific password from appleid.apple.com).
+#   --notary-profile NAME
+#                    keychain profile for --notarize (default: cdj3k-emu-notarization;
+#                    NOTARY_PROFILE env var overrides).
 #
 # Prerequisites:
 #   - qemu/install/lib/libcdj3k-emu-qemu.dylib  (from qemu/build.sh)
 #   - qemu/install/bin/qemu-img             (from qemu/build.sh)
 #   - build/initramfs-work/rootfs/lib/modules/*.ko  (from build.sh)
-#   - tools/*_aarch64, guest/out/ep122_shim.so   (pre-built guest tools)
+#   - guest/out/*_aarch64, guest/out/ep122_shim.so  (from build.sh)
 #
 # The script:
 #   1. Builds tools/cdj3k-emu with cargo
@@ -30,7 +41,10 @@
 #   3. Copies cdj3k-emu, libcdj3k-emu-qemu.dylib, qemu-img, socket_vmnet into Contents/MacOS
 #   4. Populates Contents/Resources: modules/*.ko, patch/, tools/, assets/
 #   5. Writes Info.plist
-#   6. Codesigns the bundle (real identity when provided, ad-hoc otherwise)
+#   6. Bundles the Homebrew dylib graph next to the binaries (@loader_path) so
+#      the .app is self-contained and runs without Homebrew installed
+#   7. Codesigns the bundle (real identity when provided, ad-hoc otherwise)
+#   8. Optionally notarizes + staples the .app and the .dmg
 
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
@@ -62,8 +76,10 @@ OUT_DIR="$REPO_ROOT/dist"
 # Falls back to ad-hoc ("-") when not set.
 SIGN_IDENTITY="${CODESIGN_IDENTITY:-}"
 MAKE_DMG=0
-APP_VERSION="0.1.0"
+APP_VERSION="0.1.2"
 APP_BUILD="1"
+NOTARIZE=0
+NOTARY_PROFILE="${NOTARY_PROFILE:-cdj3k-emu-notarization}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -78,9 +94,32 @@ while [[ $# -gt 0 ]]; do
         --version)    APP_VERSION="$2"; shift ;;
         --build=*)    APP_BUILD="${1#--build=}" ;;
         --build)      APP_BUILD="$2"; shift ;;
+        --notarize)   NOTARIZE=1 ;;
+        --notary-profile=*) NOTARY_PROFILE="${1#--notary-profile=}" ;;
+        --notary-profile)   NOTARY_PROFILE="$2"; shift ;;
+        -h|--help)    sed -n '3,/^$/p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *)            echo "ERROR: unknown argument: $1" >&2; exit 1 ;;
     esac
     shift
 done
+
+# Notarization is an Apple-side check of a Developer ID signature: it is
+# meaningless (and refused by notarytool) for ad-hoc or Apple Development
+# signatures, so fail here rather than after the whole bundle is assembled.
+if [[ "$NOTARIZE" -eq 1 ]]; then
+    if [[ "$SIGN_IDENTITY" != *"Developer ID Application"* ]]; then
+        echo "ERROR: --notarize needs --sign \"Developer ID Application: ...\"" >&2
+        echo "       (got: '${SIGN_IDENTITY:-ad-hoc}')" >&2
+        exit 1
+    fi
+    if ! xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" >/dev/null 2>&1; then
+        echo "ERROR: no notarytool credentials under keychain profile '$NOTARY_PROFILE'." >&2
+        echo "       Store them once (needs an app-specific password from appleid.apple.com):" >&2
+        echo "         xcrun notarytool store-credentials $NOTARY_PROFILE \\" >&2
+        echo "             --apple-id <APPLE_ID> --team-id <TEAM_ID>" >&2
+        exit 1
+    fi
+fi
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 BINARY="$REPO_ROOT/target/$PROFILE/cdj3k-emu"
@@ -233,8 +272,16 @@ HDR
 } > "$RES_PATCH/patch-rootfs.sh"
 chmod +x "$RES_PATCH/patch-rootfs.sh"
 
-[[ -f "$REPO_ROOT/guest/out/cfgd_aarch64" ]] && \
+# cfgd_aarch64 is required: 21-cfgd.sh aborts the whole rootfs patch without
+# it.  Checked here because that abort happens at *provision* time, long after
+# a bundle that skipped the file silently looked like it built cleanly.
+if [[ -f "$REPO_ROOT/guest/out/cfgd_aarch64" ]]; then
     cp "$REPO_ROOT/guest/out/cfgd_aarch64" "$RES_PATCH/"
+else
+    echo "ERROR: guest/out/cfgd_aarch64 not found" >&2
+    echo "       Run: ./build.sh" >&2
+    exit 1
+fi
 echo "     bundled merged patch-rootfs.sh (${#PATCH_STEPS[@]} steps inlined)"
 
 # patch/vanilla-modules/  - 6.6 out-of-tree modules for 22-vanilla-kernel-fixups.sh
@@ -256,10 +303,13 @@ else
     echo "WARNING: build/docker-out/dummy_drv.so not found - run ./build.sh first"
 fi
 
-# tools/   - aarch64 guest ELFs + ep122_shim.so
+# tools/   - aarch64 guest ELFs + ep122_shim.so.  The firmware provisioner
+# installs everything here into the rootfs's /usr/bin (ep122_shim.so goes to
+# /home/root); stemd_client is the STEMS sidecar that 30-stemd-client.sh
+# turns into a service.
 RES_TOOLS="$RES_DIR/tools"
 mkdir -p "$RES_TOOLS"
-for tool in subucom_live subucom_forwarder; do
+for tool in subucom_live subucom_forwarder stemd_client; do
     src="$REPO_ROOT/guest/out/${tool}_aarch64"
     if [[ -f "$src" ]]; then
         cp "$src" "$RES_TOOLS/$tool"
@@ -351,6 +401,30 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
+# ── Self-contain dylibs ──────────────────────────────────────────────────────
+# qemu-img and libcdj3k-emu-qemu.dylib link against /opt/homebrew libraries.
+# Copy that whole (transitive) dependency graph next to the binaries and rewrite
+# every load command to @loader_path so the .app runs on a machine without
+# Homebrew. The helper ad-hoc-signs what it rewrites; the real codesign below
+# re-seals everything with the final identity.
+echo "==> Bundling Homebrew dylibs into the app (self-contained)"
+"$REPO_ROOT/scripts/bundle-dylibs.sh" "$MACOS_DIR" \
+    libcdj3k-emu-qemu.dylib qemu-img cdj3k-emu socket_vmnet
+# Nothing in Contents/MacOS may still name a path outside the bundle or the
+# OS: a leftover /opt/homebrew reference is a crash on a clean machine.
+# (`grep -v` exits 1 when nothing is stray, which `set -e -o pipefail` would
+# otherwise turn into a silent exit of the whole script.)
+STRAY=$(for f in "$MACOS_DIR"/*; do
+            otool -L "$f" 2>/dev/null | tail -n +2 | awk '{print $1}' \
+              | { grep -v '^/usr/lib/\|^/System/\|^@loader_path/\|^@rpath/\|^@executable_path/' || true; } \
+              | sed "s|^|$(basename "$f"): |"
+        done)
+if [[ -n "$STRAY" ]]; then
+    echo "ERROR: unbundled dylib references remain:" >&2
+    echo "$STRAY" >&2
+    exit 1
+fi
+
 # ── Codesign ─────────────────────────────────────────────────────────────────
 # cdj3k-emu calls Hypervisor.framework via libcdj3k-emu-qemu.dylib - the entitlement
 # must be on the process binary (cdj3k-emu), not the dylib.
@@ -359,6 +433,9 @@ PLIST
 #   --options runtime enables the hardened runtime required for notarization
 #   and is also what allows TCC (Full Disk Access) to track the app by its
 #   bundle ID so it appears in System Settings → Privacy & Security → FDA.
+#   --timestamp embeds a secure timestamp; notarization rejects a signature
+#   without one, and it is what keeps the signature valid after the
+#   certificate expires.
 #
 # With ad-hoc (-): HVF works locally but TCC cannot identify the app -
 #   it will never appear in the FDA list and physical USB passthrough
@@ -381,9 +458,9 @@ ENT
 if [[ -n "$SIGN_IDENTITY" ]]; then
     echo "==> Codesigning bundle (identity: $SIGN_IDENTITY)"
     # Deep-sign all nested binaries first (no entitlements on helpers/dylibs).
-    codesign --force --deep --options runtime --sign "$SIGN_IDENTITY" "$APP_DIR"
-    # Re-sign the main binary with HVF entitlement - --deep would have stripped it.
-    codesign --force --options runtime --sign "$SIGN_IDENTITY" \
+    codesign --force --deep --options runtime --timestamp --sign "$SIGN_IDENTITY" "$APP_DIR"
+    # Re-sign the main binary with HVF entitlement — --deep would have stripped it.
+    codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" \
         --entitlements "$HVF_ENT" "$MACOS_DIR/cdj3k-emu"
     codesign --verify --deep --strict "$APP_DIR"
     echo "     signed with: $SIGN_IDENTITY"
@@ -398,6 +475,45 @@ else
 fi
 
 rm "$HVF_ENT"
+
+# ── Notarization (optional) ──────────────────────────────────────────────────
+# Submit, wait for Apple's verdict, staple the ticket.  The .app is notarized
+# on its own (zipped: notarytool takes zip/dmg/pkg) so the copy inside the DMG
+# already carries a stapled ticket; the DMG is then signed and notarized as a
+# second artefact below.  `spctl` afterwards is the same check Gatekeeper runs
+# on first launch.
+notarize_path() {
+    local what="$1" log
+    log=$(mktemp -t notary-log)
+    TMP_CLEANUP+=("$log")
+    echo "==> Notarizing $(basename "$what") (profile: $NOTARY_PROFILE)"
+    if ! xcrun notarytool submit "$what" --keychain-profile "$NOTARY_PROFILE" \
+            --wait 2>&1 | tee "$log"; then
+        local id
+        id=$(awk '/^ *id:/{print $2; exit}' "$log")
+        echo "ERROR: notarization of $(basename "$what") failed" >&2
+        if [[ -n "$id" ]]; then
+            echo "       Apple's log for submission $id:" >&2
+            xcrun notarytool log "$id" --keychain-profile "$NOTARY_PROFILE" >&2 || true
+        fi
+        exit 1
+    fi
+    if ! grep -q "status: Accepted" "$log"; then
+        echo "ERROR: notarization of $(basename "$what") was not accepted (see above)" >&2
+        exit 1
+    fi
+}
+
+if [[ "$NOTARIZE" -eq 1 ]]; then
+    NOTARY_STAGING=$(mktemp -d)
+    TMP_CLEANUP+=("$NOTARY_STAGING")
+    APP_ZIP="$NOTARY_STAGING/$(basename "$APP_DIR").zip"
+    ditto -c -k --keepParent "$APP_DIR" "$APP_ZIP"
+    notarize_path "$APP_ZIP"
+    xcrun stapler staple "$APP_DIR"
+    spctl -a -t exec -vv "$APP_DIR"
+    echo "     stapled: $APP_DIR"
+fi
 
 # ── DMG packaging (optional) ─────────────────────────────────────────────────
 if [[ "$MAKE_DMG" -eq 1 ]]; then
@@ -426,6 +542,17 @@ if [[ "$MAKE_DMG" -eq 1 ]]; then
 
     rm -rf "$DMG_STAGING"
     echo "     wrote $(du -h "$DMG_PATH" | cut -f1) DMG"
+
+    if [[ -n "$SIGN_IDENTITY" ]]; then
+        codesign --force --timestamp --sign "$SIGN_IDENTITY" "$DMG_PATH"
+        echo "     signed DMG with: $SIGN_IDENTITY"
+    fi
+    if [[ "$NOTARIZE" -eq 1 ]]; then
+        notarize_path "$DMG_PATH"
+        xcrun stapler staple "$DMG_PATH"
+        spctl -a -t open --context context:primary-signature -vv "$DMG_PATH"
+        echo "     stapled: $DMG_PATH"
+    fi
 fi
 
 echo ""
