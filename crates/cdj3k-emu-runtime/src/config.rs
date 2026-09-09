@@ -77,11 +77,8 @@ pub struct QemuConfig {
 }
 
 impl QemuConfig {
-    /// Guest RAM in bytes. Anonymous mmap is demand-paged on macOS HVF, so the
-    /// host only commits pages the guest actually touches - 1.5 GiB is plenty
-    /// for the observed working set and lets four instances coexist
-    /// comfortably. Must be 64 KiB aligned.
-    pub const MEM_BYTES: u64 = 0x6000_0000;
+    /// Guest RAM in bytes. Set to 3 GiB.
+    pub const MEM_BYTES: u64 = 0xC000_0000;
 
     pub fn new(kernel: PathBuf, initramfs: PathBuf) -> Self {
         Self {
