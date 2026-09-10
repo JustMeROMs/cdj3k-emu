@@ -127,7 +127,7 @@ static int classify_self_thread(void)
 static int real_clock_gettime(clockid_t clk_id, struct timespec *tp)
 {
     long r = syscall(SYS_clock_gettime, clk_id, tp);
-    if (r < 0) { errno = (int)-r; return -1; }
+    if (r < 0) return -1;   /* glibc syscall() already set errno */
     return 0;
 }
 
@@ -198,7 +198,7 @@ int gettimeofday(struct timeval *tv, void *tz)
 #endif
 {
     long r = syscall(SYS_gettimeofday, tv, tz);
-    if (r < 0) { errno = (int)-r; return -1; }
+    if (r < 0) return -1;   /* glibc syscall() already set errno */
     if (!tv) return 0;
 
     if (g_thread_shift < 0)

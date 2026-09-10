@@ -310,7 +310,7 @@ ssize_t sendto(int sockfd, const void *buf, size_t len, int flags,
     }
     long r = syscall(SYS_sendto, (long)sockfd, (long)buf, (long)len,
                      (long)flags, (long)dest_addr, (long)addrlen);
-    if (r < 0) { errno = (int)-r; return -1; }
+    if (r < 0) return -1;   /* glibc syscall() already set errno */
     return (ssize_t)r;
 }
 
@@ -331,7 +331,7 @@ ssize_t sendmsg(int sockfd, const struct msghdr *msg, int flags)
         }
     }
     long r = syscall(SYS_sendmsg, (long)sockfd, (long)msg, (long)flags);
-    if (r < 0) { errno = (int)-r; return -1; }
+    if (r < 0) return -1;   /* glibc syscall() already set errno */
     return (ssize_t)r;
 }
 
