@@ -21,13 +21,18 @@ real LAN visibility on macOS we use either `vmnet.framework` (via
 
 ---
 
-## Three modes
+## Four modes
 
 | Mode             | QEMU netdev                                                                                       | L2 reach           | Needs root | Cleanup mechanism      |
 | ---------------- | ------------------------------------------------------------------------------------------------- | ------------------ | ---------- | ---------------------- |
 | **User-mode**    | `user,id=net0,hostfwd=tcp::<2222+id>-:22`                                                         | NAT only           | no         | n/a                    |
 | **vmnet-bridged**| `stream,id=net0,server=off,addr.type=unix,addr.path=<sock>`                                       | full L2 on iface   | yes        | watchdog unlinks sock  |
+| **vmnet-host** (link-local) | same `stream` netdev, one shared `socket_vmnet --vmnet-mode host` daemon                | shared `bridgeN`, no NIC | yes  | watchdog unlinks sock  |
 | **TAP bridge**   | `tap,id=net0,fd=<N>`                                                                              | full L2 via TAP    | yes        | heartbeat-file watcher |
+
+**vmnet-host** ("Host-only (link-local)") puts all instances on the same virtual `bridgeN`,
+isolated from physical interfaces. The daemon uses a fixed `--vmnet-network-identifier` (see `vmnet.rs`, `VMNET_HOST_NETWORK_ID`),
+without DHCP, and guests self-assign 169.254/16 via `avahi-autoipd`. Host also self-assigns a 169.254 address; no L3 (host) access during DHCP timeout (~16s), but L2 (broadcast) is unaffected.
 
 Selection logic lives in `crates/cdj3k-emu-runtime/src/config.rs:274-298`:
 TAP fd wins if present, otherwise the vmnet socket path wins, otherwise
@@ -75,30 +80,25 @@ Binary search order (`vmnet.rs:16-20`, `find_binary()`):
 ```
 
 **Daemon is shared across instances.** The socket path is keyed by the
-host interface name (`runtime_paths::vmnet_sock(iface)`). On `start_bridged`
-(`vmnet.rs:55-80`):
+host interface name (`runtime_paths::vmnet_sock(iface)`). Each instance
+holds a lease on it - a file named by its PID under `<sock>.clients/`,
+written before the socket is probed - then attaches if `connect()` succeeds
+and launches the daemon otherwise (`SocketVmnet::acquire`). Three instances
+share one daemon and one elevation dialog, and the daemon outlives whichever
+instance started it. `Drop` removes the instance's own lease.
 
-1. If `connect()` to the socket succeeds → attach, `owns_daemon=false`.
-2. Stale socket file with no listener → unlink, then proceed.
-3. Otherwise → `launch_elevated()`, `owns_daemon=true`.
-
-`Drop` unlinks the socket only if `owns_daemon` (`vmnet.rs:94-100`).
-That's how three concurrent instances share one daemon and one
-elevation dialog: the second and third just attach.
-
-**Root-side watchdog** (`vmnet.rs:194-211`): the elevated shell spawns
-a subshell that polls every second:
+**Root-side watchdog** (`launch_elevated`): the elevated shell spawns a
+subshell that, every second, keeps the daemon while any lease names a live
+PID (sweeping dead ones) and the socket file exists, then reaps it:
 
 ```sh
-while kill -0 <cdj3k-emu pid> && [ -S <sock> ]; do sleep 1; done
 kill <SV_PID>; sleep 0.3; kill -9 <SV_PID>; rm -f <sock>
 ```
 
-Either the host app vanishes (crash / SIGKILL / clean exit) or the
-socket gets unlinked (the user-side `stop()` signal) and the daemon
-is reaped. The user-level app cannot kill a root process directly,
-but it *can* unlink a socket in a user-owned directory - that's the
-shutdown channel.
+The user-level app cannot kill a root process, but it *can* unlink a socket
+in a user-owned directory - that's the shutdown channel, used by the last
+instance's exit cleanup. A djx-emu instance on the same socket is counted
+only if it writes a lease the same way.
 
 ### Mode 3 - TAP bridge
 
@@ -189,8 +189,8 @@ A user-level process can `kill()` only processes it owns. socket_vmnet
 runs as root after elevation; if the host app crashes, the kernel
 cannot send it a teardown signal. The pattern across both modes:
 
-- **vmnet**: watchdog polls cdj3k-emu PID + socket file presence
-  (`launch_elevated` in `vmnet.rs:178-211`).
+- **vmnet**: watchdog polls the per-instance lease PIDs + socket file
+  presence (`launch_elevated` in `vmnet.rs`).
 - **tapbridge**: watcher polls cdj3k-emu PID + heartbeat file
   (`build_watcher_script` in `tapbridge.rs:136-215`).
 

@@ -138,6 +138,10 @@ user's responsibility, by whatever means they are themselves entitled to.
 - Service mode (EP122TestMode) is reachable via the Emulation menu but some
   test routines that touch hardware-only registers (e.g. fan-RPM read) return
   fixed values.
+- LINK MODE (rekordbox <-> Emulation) is half-working.
+- PC Link and Audio HID functionality are not available.
+  This requires a guest USB gadget presenting HID and MIDI, connected to a CoreMIDI endpoint.
+  On macOS 15 and later, all virtual HID implementations (such as IOHIDUserDevice via a DriverKit HID extension) are restricted by Apple Entitlements.
 
 ## Controls
 
@@ -159,20 +163,52 @@ On a real CDJ, you can hold a button or touch the screen while doing something e
 
 This lets you, for example, keep `Search Forward` held down while moving the jog wheel to search faster, just like on real hardware.
 
+## EP122 mods
+
+The LD_PRELOAD shim also carries the [cdj3k-mods](https://github.com/nsaintot/cdj3k-mods)
+feature set (Gate Cue, MOD SETTINGS, Themes, STEMS, X-PAD), pulled in as the
+git submodule at `guest/ep122_shim/cdj3k-mods` and linked into `ep122_shim.so`
+by `guest/Makefile`. It's gated by **Emulation → EP122 Mods**, off by default.
+Until it is checked the instance boots with `ep122_no_mods` on the kernel
+cmdline; the guest turns that into `EP122_NO_MODS=1` in EP122's environment and
+the mods stay out of the process entirely. Checking it restarts the instance
+with the mods installed. The setting is persisted per instance. `cdj3k-emu
+--no-mods` forces the gate off for one launch without touching the saved value.
+
+STEMS needs a [stemd](https://github.com/nsaintot/stemd) server on the LAN; the
+guest-side `stemd_client` sidecar (`stemd-client.service`) discovers it over
+mDNS or takes an address from MOD SETTINGS.
+
 ## Building
 
 ```bash
+# 0. The mods are a submodule.
+git clone --recurse-submodules https://github.com/nsaintot/cdj3k-emu
+#    (or, in an existing checkout:)  git submodule update --init
+
 # 1. Build QEMU (clones upstream, applies our shm-display patch, ~10 min).
 ./qemu/build.sh
 
-# 2. Build the aarch64 kernel, out-of-tree modules, and guest tools (Docker).
+# 2. Build the aarch64 kernel, out-of-tree modules, shim + mods, and guest
+#    tools (Docker). `make abi-check` gates the shim against the deck's glibc.
 ./build.sh
 
-# 3. Assemble the .app bundle.
+# 3. Assemble the .app bundle. The Homebrew dylibs QEMU links against are
+#    copied into the bundle and rewritten to @loader_path, so the .app runs
+#    on a Mac without Homebrew.
 ./bundle.sh                # ad-hoc signed (HVF works, FDA does not)
 ./bundle.sh --sign "Apple Development"   # real cert (enables Full Disk Access)
-./bundle.sh --sign "..." --dmg           # also produce a distributable .dmg
+./bundle.sh --sign "Developer ID Application" --dmg   # distributable .dmg
+
+# or, optionally, a Release build: Developer ID + notarized + stapled .app and .dmg.
+#    One-time: store notary credentials (app-specific password from appleid.apple.com) under a keychain profile:
+
+xcrun notarytool store-credentials cdj3k-emu-notarization --apple-id <APPLE_ID> --team-id <TEAM_ID>
+./bundle.sh --sign "Developer ID Application" --dmg --notarize
 ```
+
+`scripts/sync-mods.sh [branch]` moves the submodule to the tip of a cdj3k-mods
+branch; commit the new pin afterwards.
 
 ## First-run privilege prompts
 
@@ -196,10 +232,9 @@ privileges — every elevation is scoped to one command.
 - [ALC](docs/alc.md)
 - [Network stack](docs/network.md)
 - [Storage](docs/storage.md)
-- [Firmware install](docs/firmware-install.md)
-- [Firmware compatibility](docs/firmware-compatibility.md)
-- [Firmware decryption](docs/firmware-decryption.md)
-- [Firmware installation](docs/firmware-installation.md)
+- [Host/guest stream transports](docs/stream-transports.md)
+- [subucom SPI protocol](docs/subucom.md)
+- [G2M (Renesas) — unsupported target](docs/g2m-renesas.md)
 
 
 ## Repository layout
@@ -210,14 +245,15 @@ crates/cdj3k-emu-*   Rust workspace: subucom, streams, platform, ui,
                      runtime, storage, firmware
 guest/               C sources built for the guest:
   cfgd/                cdj3k-cfgd  - virtio-serial config daemon
-  ep122_shim/          ep122_shim.so - LD_PRELOAD shim
+  ep122_shim/          ep122_shim.so - LD_PRELOAD shim (emulation half)
+    cdj3k-mods/        submodule: the EP122 mods + stemd_client sidecar
   subucom/             subucom_forwarder, subucom_live
   modules/             out-of-tree kernel modules (subucom_virt, virtio_snd, udev_usb1)
   kernel-patches/      vanilla 6.6 patches + the guest kernel .config
 qemu/                upstream QEMU source + our overlay patches
 docker/              Alpine + Ubuntu build pipeline for guest artefacts
 initramfs-patch/     numbered rootfs patch scripts (concatenated by bundle.sh)
-.github/workflows/   CI (build + bundle on every push)
+scripts/             bundle-dylibs.sh (self-contained .app), sync-mods.sh
 ```
 
 ## License

@@ -32,11 +32,12 @@ pub const NO_USB_MOUNTED: i32 = -1;
 pub const NET_SEL_NONE: u32 = u32::MAX;
 
 /// Sentinel value for [`AppState::selected_interface`] meaning "vmnet host-only
-/// network" (menu's "Host-only (vmnet)" entry). All instances selecting this
+/// network" (menu's "Host-only (link-local)" entry). All instances selecting this
 /// attach to the same `socket_vmnet --vmnet-mode=host` daemon, sharing a
 /// host-side `bridgeN` interface that vmnet.framework creates. Pure L2,
-/// host-sniffable in Wireshark with no encapsulation, vmnet's built-in DHCP
-/// hands out 192.168.x.y addresses to the guests.
+/// host-sniffable in Wireshark with no encapsulation. The daemon runs with
+/// `--vmnet-network-identifier`, so the segment has no DHCP server: guests
+/// self-assign 169.254/16 link-local via avahi-autoipd, like real gear.
 pub const NET_SEL_VMNET_HOST: u32 = u32::MAX - 1;
 
 /// Token written to `InstanceSettings::net_iface` to persist the vmnet-host
@@ -118,6 +119,16 @@ pub struct AppState {
     /// MISO stimuli and clears.
     pub power_off_stimuli_requested: bool,
     pub service_mode: bool,
+
+    /// "EP122 Mods" toggle - whether the cdj3k-mods linked into
+    /// ep122_shim.so install themselves inside EP122.  Off puts
+    /// `ep122_no_mods` on the kernel cmdline (guest patch 13 turns it into
+    /// `EP122_NO_MODS=1` in EP122's environment).  Persisted in
+    /// InstanceSettings; a QEMU restart applies it.
+    pub mods_enabled: bool,
+    /// One-shot: set when the user toggles the menu item; the runtime worker
+    /// persists `mods_enabled` to InstanceSettings.
+    pub mods_toggle_requested: bool,
 
     // ── Audio toggles ───────────────────────────────────────────────────────
     /// Mirror of the per-instance `audio_enabled` setting. Toggled by the
@@ -214,6 +225,8 @@ impl AppState {
             shade_forced: false,
             power_off_stimuli_requested: false,
             service_mode: false,
+            mods_enabled: false,
+            mods_toggle_requested: false,
             audio_enabled: false,
             audio_toggle_requested: false,
             audio_device_uid: None,

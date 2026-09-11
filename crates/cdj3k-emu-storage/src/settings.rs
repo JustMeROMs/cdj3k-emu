@@ -111,6 +111,13 @@ pub struct InstanceSettings {
     /// Defaults to **true**; users on hardware without an actuator see no
     /// change either way (the platform layer no-ops silently).
     pub haptic_enabled: bool,
+    /// "EP122 Mods" toggle.  When false the emulator puts `ep122_no_mods` on
+    /// the kernel cmdline and the guest exports `EP122_NO_MODS=1` into
+    /// EP122's environment, so the cdj3k-mods linked into ep122_shim.so stay
+    /// out of the process (the shim's own emulation plumbing still loads).
+    /// Defaults to **false**: a fresh instance boots a stock EP122 and the
+    /// user opts in from the menu.  Applied at the next QEMU (re)start.
+    pub mods_enabled: bool,
     /// Last user-selected network interface name (e.g. "en0"), or `None` for
     /// "no network".  Restored on launch if the iface is still present;
     /// otherwise kept on disk so it can re-bind when the iface returns.
@@ -166,6 +173,11 @@ impl InstanceSettings {
             .get("haptic_enabled")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(true);
+        // Mods default: OFF - opt-in from Emulation > EP122 Mods.
+        let mods_enabled = map
+            .get("mods_enabled")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
         let net_iface = map.get("net_iface").filter(|v| !v.is_empty()).cloned();
         let usb_virtual_path = map
             .get("usb_virtual_path")
@@ -181,6 +193,7 @@ impl InstanceSettings {
             audio_device_uid,
             alc_enabled,
             haptic_enabled,
+            mods_enabled,
             net_iface,
             usb_virtual_path,
             usb_physical_bsd,
@@ -206,6 +219,10 @@ impl InstanceSettings {
         map.insert(
             "haptic_enabled".into(),
             (if self.haptic_enabled { "1" } else { "0" }).to_string(),
+        );
+        map.insert(
+            "mods_enabled".into(),
+            (if self.mods_enabled { "1" } else { "0" }).to_string(),
         );
         map.insert(
             "net_iface".into(),

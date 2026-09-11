@@ -178,38 +178,38 @@ typedef struct {
 
 static inline int sys_openat(const char *path, int flags, mode_t mode) {
     long r = syscall(SYS_openat, AT_FDCWD, path, flags, mode);
-    if (r < 0) { errno = (int)-r; return -1; }
+    if (r < 0) return -1;   /* glibc syscall() already set errno */
     return (int)r;
 }
 static inline int sys_close(int fd) {
     long r = syscall(SYS_close, fd);
-    if (r < 0) { errno = (int)-r; return -1; }
+    if (r < 0) return -1;   /* glibc syscall() already set errno */
     return 0;
 }
 static inline int sys_ioctl(int fd, unsigned long req, void *arg) {
     long r = syscall(SYS_ioctl, fd, req, arg);
-    if (r < 0) { errno = (int)-r; return -1; }
+    if (r < 0) return -1;   /* glibc syscall() already set errno */
     return (int)r;
 }
 static inline ssize_t sys_read(int fd, void *buf, size_t n) {
     long r = syscall(SYS_read, fd, buf, n);
-    if (r < 0) { errno = (int)-r; return -1; }
+    if (r < 0) return -1;   /* glibc syscall() already set errno */
     return (ssize_t)r;
 }
 static inline ssize_t sys_write(int fd, const void *buf, size_t n) {
     long r = syscall(SYS_write, fd, buf, n);
-    if (r < 0) { errno = (int)-r; return -1; }
+    if (r < 0) return -1;   /* glibc syscall() already set errno */
     return (ssize_t)r;
 }
 static inline int sys_dup(int fd) {
     long r = syscall(SYS_dup, fd);
-    if (r < 0) { errno = (int)-r; return -1; }
+    if (r < 0) return -1;   /* glibc syscall() already set errno */
     return (int)r;
 }
 static inline void *sys_mmap(void *addr, size_t len, int prot, int flags,
                                int fd, off_t off) {
     long r = syscall(SYS_mmap, addr, len, prot, flags, fd, off);
-    if (r < 0) { errno = (int)-r; return MAP_FAILED; }
+    if (r < 0) return MAP_FAILED;   /* glibc syscall() already set errno */
     return (void *)r;
 }
 

@@ -113,6 +113,10 @@ fn main() {
         .map(|v| v != "0" && !v.is_empty())
         .unwrap_or(false);
 
+    // `--no-mods` boots this launch with the EP122 mods gated off, without
+    // touching the persisted "EP122 Mods" menu setting.
+    let mut no_mods = false;
+
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -142,6 +146,9 @@ fn main() {
             }
             "--profile" => {
                 profile = true;
+            }
+            "--no-mods" => {
+                no_mods = true;
             }
             _ => {}
         }
@@ -189,6 +196,7 @@ fn main() {
             s.audio_device_uid = inst_settings.audio_device_uid.clone();
             s.alc_enabled = inst_settings.alc_enabled;
             s.haptic_enabled = inst_settings.haptic_enabled;
+            s.mods_enabled = inst_settings.mods_enabled && !no_mods;
         }
 
         // Restore network interface selection (best effort).  If the saved
@@ -225,6 +233,7 @@ fn main() {
         config.emmc_img = emmc_img;
         config.audio = inst_settings.audio_enabled;
         config.audio_device_uid = inst_settings.audio_device_uid.clone();
+        config.mods_enabled = inst_settings.mods_enabled && !no_mods;
         config.mac = Some(inst_settings.mac);
         config.serial_log = serial_log;
 

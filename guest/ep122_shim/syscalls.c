@@ -4,6 +4,7 @@
 /* ------------------------------------------------------------------ */
 
 #include "ep122_shim.h"
+#include "mods/core/cdj3k_mods.h"
 
 static int do_open(const char *pathname, int flags, mode_t mode) {
     if (pathname) {
@@ -120,7 +121,15 @@ static int do_open(const char *pathname, int flags, mode_t mode) {
             return fd;
         }
     }
-    return sys_openat(pathname, flags, mode);
+    {
+        int fd = sys_openat(pathname, flags, mode);
+
+        /* Tell the library watcher, which cares about exactly one family of
+         * paths and returns immediately for everything else. See mods/db/. */
+        if (fd >= 0 && pathname)
+            db_watch_open(pathname, fd, flags);
+        return fd;
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -156,7 +165,7 @@ int openat(int dirfd, const char *pathname, int flags, ...) {
         mode = va_arg(ap, mode_t); va_end(ap);
     }
     long r = syscall(SYS_openat, dirfd, pathname, flags, mode);
-    if (r < 0) { errno = (int)-r; return -1; }
+    if (r < 0) return -1;   /* glibc syscall() already set errno */
     return (int)r;
 }
 
@@ -181,35 +190,35 @@ static int vsync_fake_stat(struct stat *buf) {
 int stat(const char *path, struct stat *buf) {
     if (path && strstr(path, "vsync_time") != NULL) return vsync_fake_stat(buf);
     long r = syscall(SYS_fstatat, AT_FDCWD, path, buf, 0);
-    if (r < 0) { errno = (int)-r; return -1; }
+    if (r < 0) return -1;   /* glibc syscall() already set errno */
     return 0;
 }
 
 int lstat(const char *path, struct stat *buf) {
     if (path && strstr(path, "vsync_time") != NULL) return vsync_fake_stat(buf);
     long r = syscall(SYS_fstatat, AT_FDCWD, path, buf, AT_SYMLINK_NOFOLLOW);
-    if (r < 0) { errno = (int)-r; return -1; }
+    if (r < 0) return -1;   /* glibc syscall() already set errno */
     return 0;
 }
 
 int fstatat(int dirfd, const char *path, struct stat *buf, int flags) {
     if (path && strstr(path, "vsync_time") != NULL) return vsync_fake_stat(buf);
     long r = syscall(SYS_fstatat, dirfd, path, buf, flags);
-    if (r < 0) { errno = (int)-r; return -1; }
+    if (r < 0) return -1;   /* glibc syscall() already set errno */
     return 0;
 }
 
 int access(const char *path, int mode) {
     if (path && strstr(path, "vsync_time") != NULL) return 0;
     long r = syscall(SYS_faccessat, AT_FDCWD, path, mode, 0);
-    if (r < 0) { errno = (int)-r; return -1; }
+    if (r < 0) return -1;   /* glibc syscall() already set errno */
     return 0;
 }
 
 int faccessat(int dirfd, const char *path, int mode, int flags) {
     if (path && strstr(path, "vsync_time") != NULL) return 0;
     long r = syscall(SYS_faccessat, dirfd, path, mode, flags);
-    if (r < 0) { errno = (int)-r; return -1; }
+    if (r < 0) return -1;   /* glibc syscall() already set errno */
     return 0;
 }
 
@@ -222,6 +231,7 @@ int faccessat(int dirfd, const char *path, int mode, int flags) {
 extern int ep122_link_intercept_close(int fd);
 
 int close(int fd) {
+    db_watch_close(fd);
     if (is_drm_fd(fd)) {
         remove_drm_fd(fd);
         flip_slot_free(fd);  /* release per-fd flip event state */
@@ -345,7 +355,7 @@ int poll(struct pollfd *fds, nfds_t nfds, int timeout) {
     /* Pure passthrough when no stub fds involved */
     if (!stub_n) {
         long r = raw_poll(fds, nfds, timeout);
-        if (r < 0) { errno = (int)-r; return -1; }
+        if (r < 0) return -1;   /* glibc syscall() already set errno */
         return (int)r;
     }
 
@@ -371,7 +381,7 @@ int poll(struct pollfd *fds, nfds_t nfds, int timeout) {
         }
         int cap = flip_pending ? 0 : ((timeout < 0 || timeout > 33) ? 33 : timeout);
         long r = raw_poll(fds, nfds, cap);
-        if (r < 0) { errno = (int)-r; return -1; }
+        if (r < 0) return -1;   /* glibc syscall() already set errno */
         /* Overlay synthetic DRM POLLIN for fds that have a pending flip.
          * OR-into revents so we don't clear real events from other fds. */
         int total = (int)r;
@@ -415,7 +425,7 @@ int poll(struct pollfd *fds, nfds_t nfds, int timeout) {
     }
     /* Pure POLLIN: block for real timeout - no host data expected */
     long r = raw_poll(fds, nfds, timeout);
-    if (r < 0) { errno = (int)-r; return -1; }
+    if (r < 0) return -1;   /* glibc syscall() already set errno */
     for (nfds_t i = 0; i < nfds; i++)
         if (is_hidg_fd(fds[i].fd)) fds[i].revents = 0;
     return (int)r;

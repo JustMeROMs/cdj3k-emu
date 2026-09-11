@@ -30,6 +30,13 @@ pub struct QemuConfig {
     /// Boot into EP122 service/test mode.
     pub service_mode: bool,
 
+    /// Let the cdj3k-mods linked into ep122_shim.so install inside EP122.
+    /// `false` adds `ep122_no_mods` to the kernel cmdline; guest patch 13
+    /// turns that into `EP122_NO_MODS=1` in EP122's environment and the
+    /// mods' constructor returns before touching the process.  The shim's
+    /// emulation plumbing loads either way.
+    pub mods_enabled: bool,
+
     /// eMMC qcow2 image.
     /// virtio_blk.c maps device index 0 → /dev/mmcblk1 (major 179, base minor 8).
     /// Partitions p1..p8 appear as mmcblk1p1..mmcblk1p8.
@@ -70,22 +77,21 @@ pub struct QemuConfig {
 }
 
 impl QemuConfig {
-    /// Guest RAM in bytes. Anonymous mmap is demand-paged on macOS HVF, so the
-    /// host only commits pages the guest actually touches - 1.5 GiB is plenty
-    /// for the observed working set and lets four instances coexist
-    /// comfortably. Must be 64 KiB aligned.
-    pub const MEM_BYTES: u64 = 0x6000_0000;
+    /// Guest RAM in bytes. Set to 3 GiB.
+    pub const MEM_BYTES: u64 = 0xC000_0000;
 
     pub fn new(kernel: PathBuf, initramfs: PathBuf) -> Self {
         Self {
             instance_id: 0,
             kernel,
             initramfs,
-            hvf: true,
+            // CDJ3K_EMU_TCG=1 in the environment selects TCG instead of HVF.
+            hvf: std::env::var_os("CDJ3K_EMU_TCG").is_none(),
             shm: false,
             audio: false,
             audio_device_uid: None,
             service_mode: false,
+            mods_enabled: false,
             emmc_img: None,
             net_socket_vmnet: None,
             net_tap_iface: None,
@@ -172,6 +178,9 @@ impl QemuConfig {
         kcmd.push_str(" virtio_gpu.modeset=1");
         if self.service_mode {
             kcmd.push_str(" subucom_testmode");
+        }
+        if !self.mods_enabled {
+            kcmd.push_str(" ep122_no_mods");
         }
         // snd-dummy is built-in (CONFIG_SND_DUMMY=y) so its card always
         // auto-registers first - and JUCE picks card 0. When the real
