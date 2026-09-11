@@ -232,10 +232,9 @@ privileges — every elevation is scoped to one command.
 - [ALC](docs/alc.md)
 - [Network stack](docs/network.md)
 - [Storage](docs/storage.md)
-- [Firmware install](docs/firmware-install.md)
-- [Firmware compatibility](docs/firmware-compatibility.md)
-- [Firmware decryption](docs/firmware-decryption.md)
-- [Firmware installation](docs/firmware-installation.md)
+- [Host/guest stream transports](docs/stream-transports.md)
+- [subucom SPI protocol](docs/subucom.md)
+- [G2M (Renesas) — unsupported target](docs/g2m-renesas.md)
 
 
 ## Repository layout
