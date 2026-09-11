@@ -3,6 +3,8 @@
 # Two toolchain modes:
 #   make              - expects aarch64-linux-musl-gcc (Homebrew musl-cross)
 #   make docker       - builds via docker/Dockerfile (arm64v8/alpine:3.19)
+#   make abi-check    - gates out/ep122_shim.so; under musl it inspects the
+#                       Docker-built .so instead of relinking it
 #
 # The Dockerfile drives this same Makefile inside the container — no
 # duplicated gcc invocations on either side. Override the compiler with
@@ -159,7 +161,22 @@ $(OUT)/stemd_client_aarch64: $(MODS_STEMD_SRCS) $(MODS_STEMD_HDRS) | $(OUT)
 
 # --- gates ---
 purity:    mods-purity
-abi-check: $(EP122_SHIM) mods-abi-check
+
+# The musl cross compiler cannot link the shim (guard above), so under it the
+# gate inspects the .so that `make docker` left in out/ rather than relinking.
+# READELF derives from CC, and the musl readelf reads a glibc .so fine.
+ifeq ($(findstring musl,$(CC)),)
+abi-check: $(EP122_SHIM)
+else
+abi-check: shim-artifact
+.PHONY: shim-artifact
+shim-artifact:
+	@[ -f $(EP122_SHIM) ] || { \
+	  echo "ERROR: no $(EP122_SHIM) to inspect. Build it first: make docker"; exit 1; }
+	@echo "abi-check: inspecting the Docker-built $(EP122_SHIM)" \
+	  "(`date -r $(EP122_SHIM) '+%Y-%m-%d %H:%M'`); 'make docker' to rebuild."
+endif
+abi-check: mods-abi-check
 
 $(OUT)/tests/%: $(MODS_DIR)/tests/%.c $(MODS_DIR)/tests/test.h $(MODS_TEST_STUBS) \
                 $(MODS_PURE_SRCS) $(MODS_TEST_DEPS) $(MODS_HDRS)
