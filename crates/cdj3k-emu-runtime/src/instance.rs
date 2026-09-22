@@ -411,6 +411,17 @@ fn cleanup_qemu_files_inner(sock_dir: &Path, keep_dir: bool) {
     if let Ok(entries) = std::fs::read_dir(sock_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
+            // `tapbridge.alive` is the heartbeat the root-side watcher polls;
+            // removing it tells the watcher to destroy the bridge and the TAP.
+            // `TapBridge`'s Drop owns these files.
+            if keep_dir
+                && entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("tapbridge.")
+            {
+                continue;
+            }
             if let Ok(ft) = entry.file_type() {
                 if ft.is_dir() {
                     let _ = std::fs::remove_dir_all(&path);
@@ -422,6 +433,47 @@ fn cleanup_qemu_files_inner(sock_dir: &Path, keep_dir: bool) {
     }
     if !keep_dir {
         let _ = std::fs::remove_dir(sock_dir);
+    }
+}
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::{cleanup_qemu_files, cleanup_qemu_files_for_restart};
+
+    /// The restart path must leave `tapbridge.*` alone - removing the
+    /// heartbeat tells the root watcher to destroy the bridge and TAP that
+    /// QEMU is about to be handed.  Shutdown takes them with everything else.
+    #[test]
+    fn restart_keeps_tapbridge_state_shutdown_does_not() {
+        let dir = std::env::temp_dir().join(format!("cdj3k-tapclean-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let seed = || {
+            std::fs::create_dir_all(&dir).unwrap();
+            for f in [
+                "tapbridge.alive",
+                "tapbridge.sh",
+                "tapbridge.names",
+                "ctrl.sock",
+            ] {
+                std::fs::write(dir.join(f), "").unwrap();
+            }
+        };
+
+        seed();
+        cleanup_qemu_files_for_restart(&dir);
+        assert!(
+            dir.join("tapbridge.alive").exists(),
+            "heartbeat must survive a restart"
+        );
+        assert!(dir.join("tapbridge.sh").exists());
+        assert!(dir.join("tapbridge.names").exists());
+        assert!(!dir.join("ctrl.sock").exists(), "QEMU-owned files still go");
+        assert!(dir.exists(), "restart keeps the dir");
+
+        seed();
+        cleanup_qemu_files(&dir);
+        assert!(!dir.exists(), "shutdown takes the whole dir");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

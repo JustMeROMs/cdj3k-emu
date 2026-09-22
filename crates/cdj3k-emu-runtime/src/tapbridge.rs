@@ -69,6 +69,12 @@ impl TapBridge {
                 format!("invalid host tap name: {host_tap:?}"),
             ));
         }
+        // The watcher script, heartbeat and names file all live in the instance
+        // dir, and `setup` runs before `QemuInstance::spawn` - the only other
+        // thing that creates it - so on a fresh launch it is not there yet.
+        runtime_paths::ensure_runtime_base_dir()?;
+        fs::create_dir_all(runtime_paths::instance_dir(instance_id))?;
+
         // Clean up any stale interfaces from a previous unclean exit first.
         cleanup_stale(instance_id);
 
