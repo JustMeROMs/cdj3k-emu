@@ -16,23 +16,38 @@ broadcasts and arrival-time semantics don't survive NAT.
 
 QEMU's default `-netdev user` (SLIRP) is a userspace NAT stack and
 cannot carry DJPL discovery / beat broadcasts between hosts. To get
-real LAN visibility on macOS we use either `vmnet.framework` (via
-`socket_vmnet`) or a kernel TAP bridge.
+real LAN visibility on macOS we use either `vmnet.framework` - opened by
+QEMU itself, in-process - or a kernel TAP bridge.
 
 ---
 
 ## Four modes
 
-| Mode             | QEMU netdev                                                                                       | L2 reach           | Needs root | Cleanup mechanism      |
-| ---------------- | ------------------------------------------------------------------------------------------------- | ------------------ | ---------- | ---------------------- |
-| **User-mode**    | `user,id=net0,hostfwd=tcp::<2222+id>-:22`                                                         | NAT only           | no         | n/a                    |
-| **vmnet-bridged**| `stream,id=net0,server=off,addr.type=unix,addr.path=<sock>`                                       | full L2 on iface   | yes        | watchdog unlinks sock  |
-| **vmnet-host** (link-local) | same `stream` netdev, one shared `socket_vmnet --vmnet-mode host` daemon                | shared `bridgeN`, no NIC | yes  | watchdog unlinks sock  |
-| **TAP bridge**   | `tap,id=net0,fd=<N>`                                                                              | full L2 via TAP    | yes        | heartbeat-file watcher |
+| Mode             | QEMU netdev                                          | L2 reach                 | Needs root | Cleanup mechanism      |
+| ---------------- | ---------------------------------------------------- | ------------------------ | ---------- | ---------------------- |
+| **User-mode**    | `user,id=net0,hostfwd=tcp::<2222+id>-:22`            | NAT only                 | no         | n/a                    |
+| **vmnet-bridged**| `vmnet-bridged,id=net0,ifname=<iface>`               | full L2 on iface         | no         | QEMU exit              |
+| **vmnet-host** (link-local) | `vmnet-host,id=net0,net-uuid=<UUID>`      | shared `bridgeN`, no NIC | no         | QEMU exit              |
+| **TAP bridge**   | `tap,id=net0,fd=<N>`                                 | full L2 via TAP          | yes        | heartbeat-file watcher |
 
-**vmnet-host** ("Host-only (link-local)") puts all instances on the same virtual `bridgeN`,
-isolated from physical interfaces. The daemon uses a fixed `--vmnet-network-identifier` (see `vmnet.rs`, `VMNET_HOST_NETWORK_ID`),
-without DHCP, and guests self-assign 169.254/16 via `avahi-autoipd`. Host also self-assigns a 169.254 address; no L3 (host) access during DHCP timeout (~16s), but L2 (broadcast) is unaffected.
+Both vmnet modes are unprivileged: vmnet requires root *or* the
+`com.apple.developer.networking.vmnet` entitlement, and the app carries it,
+authorised by `Contents/embedded.provisionprofile`. Entitlements are
+process-wide, so QEMU reaches vmnet from inside `libcdj3k-emu-qemu.dylib` -
+the same arrangement HVF already uses. TAP is the one mode that still prompts:
+`ifconfig bridge create` is root-only and no entitlement covers it.
+
+**vmnet-host** ("Host-only (link-local)") puts all instances on the same virtual
+`bridgeN`, isolated from physical interfaces, via a fixed network UUID (see
+`vmnet.rs`, `VMNET_HOST_NETWORK_ID`; `DJPL_VMNET_UUID` overrides it, and djx-emu
+must be given the same value). The UUID both joins the segment and suppresses
+vmnet's `bootpd`, so guests fall through `udhcpc -T 2` to `avahi-autoipd` and
+self-assign 169.254/16 - matching real Pro DJ Link gear on a router-less
+network. Measured from a guest on the segment: with the UUID a DHCP DISCOVER
+goes unanswered while other traffic still flows; without it `bootpd` offers a
+192.168.128.x lease. Two interfaces created under one UUID by separate
+processes see each other's broadcasts, which is what lets several instances
+share one DJ-Link segment with no daemon between them.
 
 Selection logic lives in `crates/cdj3k-emu-runtime/src/config.rs:274-298`:
 TAP fd wins if present, otherwise the vmnet socket path wins, otherwise
@@ -61,44 +76,32 @@ userspace stack provides DHCP, DNS, and outbound NAT.
 - Fine for solo dev, building, kernel work, anything not involving
   beat-sync against a peer.
 
-### Mode 2 - vmnet-bridged (`socket_vmnet`)
+### Mode 2 - vmnet (bridged and host)
 
-Bundled / brew-installed `socket_vmnet` daemon (`lima-vm/socket_vmnet`)
-binds `vmnet.framework` in bridged mode against a chosen host
-interface, exposes it as a Unix socket, and bridges it onto the host's
-physical LAN. QEMU connects with `-netdev stream` over that socket.
-The guest receives a real MAC on the host LAN, can be ARP'd from
-other devices, and exchanges DJPL broadcasts natively.
-
-Binary search order (`vmnet.rs:16-20`, `find_binary()`):
+QEMU's own vmnet backends open `vmnet.framework` directly:
 
 ```
-<app bundle>/socket_vmnet                  (preferred - bundled)
-/opt/homebrew/bin/socket_vmnet              (Apple Silicon brew)
-/usr/local/bin/socket_vmnet                 (Intel brew)
-/opt/homebrew/opt/socket_vmnet/bin/socket_vmnet
+-netdev vmnet-bridged,id=net0,ifname=en0
+-netdev vmnet-host,id=net0,net-uuid=7b3d5e2a-9c14-4f6b-b2e1-0a1c2d3e4f50
 ```
 
-**Daemon is shared across instances.** The socket path is keyed by the
-host interface name (`runtime_paths::vmnet_sock(iface)`). Each instance
-holds a lease on it - a file named by its PID under `<sock>.clients/`,
-written before the socket is probed - then attaches if `connect()` succeeds
-and launches the daemon otherwise (`SocketVmnet::acquire`). Three instances
-share one daemon and one elevation dialog, and the daemon outlives whichever
-instance started it. `Drop` removes the instance's own lease.
+Bridged puts the guest on the host's physical LAN with a real MAC: it can be
+ARP'd from other devices and exchanges DJPL broadcasts natively. Host mode
+joins the isolated UUID segment described above.
 
-**Root-side watchdog** (`launch_elevated`): the elevated shell spawns a
-subshell that, every second, keeps the daemon while any lease names a live
-PID (sweeping dead ones) and the socket file exists, then reaps it:
+`isolated` is left at its default (off) in both modes. Switching it on cuts
+each guest off from the others on the same vmnet network, which is the
+opposite of what DJ-Link discovery needs.
 
-```sh
-kill <SV_PID>; sleep 0.3; kill -9 <SV_PID>; rm -f <sock>
-```
+**Sharing is by UUID, not by daemon.** Each QEMU process opens its own vmnet
+interface; interfaces created under one `net-uuid` land on one L2 segment.
+There is no socket, no lease, no watchdog and no shared daemon to reap - the
+interface is released when QEMU exits. Bridged instances need no coordination
+at all: they are each on the real LAN.
 
-The user-level app cannot kill a root process, but it *can* unlink a socket
-in a user-owned directory - that's the shutdown channel, used by the last
-instance's exit cleanup. A djx-emu instance on the same socket is counted
-only if it writes a lease the same way.
+`VmnetMode` (`crates/cdj3k-emu-runtime/src/vmnet.rs`) carries the choice and
+renders the `-netdev` argument; interface names are checked against the BSD
+ifname grammar before they reach a command line.
 
 ### Mode 3 - TAP bridge
 
@@ -163,8 +166,8 @@ uses the deterministic form so you can `arp -an | grep
 
 ## Elevation flow
 
-`run_elevated()` in `vmnet.rs:244-308` is the single elevation
-primitive (both vmnet and tapbridge call it):
+`run_elevated()` in `tapbridge.rs` is the single elevation primitive, and
+tapbridge is its only caller:
 
 ```
 AuthorizationCreate(NULL, NULL, kAuthorizationFlagDefaults, &auth)
@@ -185,16 +188,16 @@ for our scripts, which only spawn backgrounded daemons + watchdogs.
 
 ### Why a watcher and not direct lifetime ownership
 
-A user-level process can `kill()` only processes it owns. socket_vmnet
-runs as root after elevation; if the host app crashes, the kernel
-cannot send it a teardown signal. The pattern across both modes:
+A user-level process can `kill()` only processes it owns. The bridge and
+TAP are created by a root shell after elevation, so if the host app crashes
+the kernel cannot send them a teardown signal. Hence the watcher: it polls
+the cdj3k-emu PID and a heartbeat file (`build_watcher_script` in
+`tapbridge.rs`) and tears the interfaces down when either goes away.
 
-- **vmnet**: watchdog polls the per-instance lease PIDs + socket file
-  presence (`launch_elevated` in `vmnet.rs`).
-- **tapbridge**: watcher polls cdj3k-emu PID + heartbeat file
-  (`build_watcher_script` in `tapbridge.rs:136-215`).
+vmnet needs none of this - QEMU owns the interface and the kernel releases
+it when QEMU exits.
 
-Both signals are race-free: the host app holds an open fd to the
+The signal is race-free: the host app holds an open fd to the
 heartbeat / socket inode for its lifetime, and `kill -0 <pid>` is
 atomic against process exit.
 
@@ -279,9 +282,9 @@ the unlink-to-shutdown signal exploits exactly that asymmetry.
 
 | Path                                                       | Role                                              |
 | ---------------------------------------------------------- | ------------------------------------------------- |
-| `crates/cdj3k-emu-runtime/src/config.rs`                   | `-netdev` / `-device` selection (`L274-298`)      |
-| `crates/cdj3k-emu-runtime/src/vmnet.rs`                    | socket_vmnet elevation + root watchdog            |
-| `crates/cdj3k-emu-runtime/src/tapbridge.rs`                | bridgeN + tapM watcher, stale cleanup             |
+| `crates/cdj3k-emu-runtime/src/config.rs`                   | `-netdev` / `-device` selection                   |
+| `crates/cdj3k-emu-runtime/src/vmnet.rs`                    | `VmnetMode` -> `-netdev` argument, network UUID    |
+| `crates/cdj3k-emu-runtime/src/tapbridge.rs`                | bridgeN + tapM watcher, stale cleanup, elevation  |
 | `crates/cdj3k-emu-storage/src/settings.rs`                 | persisted `mac`, `net_iface`, MAC generator       |
 | `crates/cdj3k-emu-platform/src/runtime_paths.rs`           | socket / instance-dir layout                      |
 | `boot.sh`                                                  | dev launcher; deterministic MAC, UDP 8801 forward |

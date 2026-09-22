@@ -1,7 +1,7 @@
 Cargo.lock
 # Compiled guest binaries (all outputs land in guest/out/)
 guest/out/
-# Build workspace (includes build/cache/ — see bundle.sh socket_vmnet cache)
+# Build workspace (includes build/cache/)
 build/
 # macOS metadata
 *.DS_Store

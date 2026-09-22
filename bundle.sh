@@ -44,7 +44,7 @@
 # The script:
 #   1. Builds tools/cdj3k-emu with cargo
 #   2. Creates cdj3k-emu.app/Contents/{MacOS,Resources}
-#   3. Copies cdj3k-emu, libcdj3k-emu-qemu.dylib, qemu-img, socket_vmnet into Contents/MacOS
+#   3. Copies cdj3k-emu, libcdj3k-emu-qemu.dylib and qemu-img into Contents/MacOS
 #   4. Populates Contents/Resources: modules/*.ko, patch/, tools/, assets/
 #   5. Writes Info.plist
 #   6. Bundles the Homebrew dylib graph next to the binaries (@loader_path) so
@@ -138,18 +138,6 @@ APP_DIR="$OUT_DIR/CDJ3K Emulator.app"
 MACOS_DIR="$APP_DIR/Contents/MacOS"
 RESOURCES_DIR="$APP_DIR/Contents/Resources"
 
-SOCKET_VMNET_VERSION="1.2.2"
-SOCKET_VMNET_URL="https://github.com/lima-vm/socket_vmnet/releases/download/v${SOCKET_VMNET_VERSION}/socket_vmnet-${SOCKET_VMNET_VERSION}-arm64.tar.gz"
-# SHA-256 of the upstream arm64 release tarball.  Verified by running:
-#   shasum -a 256 socket_vmnet-1.2.2-arm64.tar.gz
-# against the asset linked from the v1.2.2 GitHub release notes.
-SOCKET_VMNET_SHA256="c7bf62308fbcfdc29bdfb8373c9b1951f7ac2396446e4390919796a94972e6dc"
-# Cached archive lives under build/ (gitignored).  Re-used across bundle runs
-# so a clean build doesn't re-download the same tarball; the SHA-256 check
-# below guards against a corrupted or tampered cache.
-SOCKET_VMNET_CACHE_DIR="$REPO_ROOT/build/cache"
-SOCKET_VMNET_CACHE_FILE="$SOCKET_VMNET_CACHE_DIR/socket_vmnet-${SOCKET_VMNET_VERSION}-arm64.tar.gz"
-
 # ── Build ─────────────────────────────────────────────────────────────────────
 if [[ "$DO_BUILD" -eq 1 ]]; then
     echo "==> cargo build $CARGO_PROFILE_FLAG -p cdj3k-emu"
@@ -184,44 +172,6 @@ if [[ ! -f "$QEMU_IMG" ]]; then
 fi
 cp "$QEMU_IMG" "$MACOS_DIR/qemu-img"
 echo "     bundled qemu-img"
-
-echo "==> Fetching socket_vmnet ${SOCKET_VMNET_VERSION}"
-mkdir -p "$SOCKET_VMNET_CACHE_DIR"
-verify_socket_vmnet_sha() {
-    local f="$1"
-    local actual
-    actual=$(shasum -a 256 "$f" | awk '{print $1}')
-    [[ "$actual" == "$SOCKET_VMNET_SHA256" ]]
-}
-if [[ -f "$SOCKET_VMNET_CACHE_FILE" ]] && verify_socket_vmnet_sha "$SOCKET_VMNET_CACHE_FILE"; then
-    echo "     reusing cached archive: $SOCKET_VMNET_CACHE_FILE"
-else
-    if [[ -f "$SOCKET_VMNET_CACHE_FILE" ]]; then
-        echo "     cached archive failed SHA-256 verification; re-downloading"
-        rm -f "$SOCKET_VMNET_CACHE_FILE"
-    fi
-    curl -fsSL "$SOCKET_VMNET_URL" -o "$SOCKET_VMNET_CACHE_FILE"
-    if ! verify_socket_vmnet_sha "$SOCKET_VMNET_CACHE_FILE"; then
-        echo "ERROR: socket_vmnet archive SHA-256 mismatch"
-        echo "       expected: $SOCKET_VMNET_SHA256"
-        echo "       got:      $(shasum -a 256 "$SOCKET_VMNET_CACHE_FILE" | awk '{print $1}')"
-        rm -f "$SOCKET_VMNET_CACHE_FILE"
-        exit 1
-    fi
-fi
-SOCKET_VMNET_TMP=$(mktemp -d)
-TMP_CLEANUP+=("$SOCKET_VMNET_TMP")
-tar -xz -f "$SOCKET_VMNET_CACHE_FILE" -C "$SOCKET_VMNET_TMP"
-SOCKET_VMNET_BIN=$(find "$SOCKET_VMNET_TMP" -name "socket_vmnet" -type f | head -1)
-if [[ -z "$SOCKET_VMNET_BIN" ]]; then
-    echo "ERROR: socket_vmnet binary not found in release tarball"
-    rm -rf "$SOCKET_VMNET_TMP"
-    exit 1
-fi
-cp "$SOCKET_VMNET_BIN" "$MACOS_DIR/socket_vmnet"
-chmod +x "$MACOS_DIR/socket_vmnet"
-rm -rf "$SOCKET_VMNET_TMP"
-echo "     bundled socket_vmnet"
 
 # ── Resources: modules, patch scripts, guest tools, PPM assets ───────────────
 #
@@ -405,9 +355,8 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
     <!-- Entitlements that matter live in the code signature, not here; this
          key is informational.  The restricted ones (vmnet, virtual HID) come
          from Contents/embedded.provisionprofile - see the codesign step.
-         Bridged Pro DJ Link still goes through the bundled socket_vmnet helper
-         (github.com/lima-vm/socket_vmnet), which runs as root behind a native
-         macOS admin dialog. -->
+         Pro DJ Link networking is QEMU's own -netdev vmnet-bridged /
+         vmnet-host, which vmnet authorises through that entitlement. -->
 </dict>
 </plist>
 PLIST
@@ -420,7 +369,7 @@ PLIST
 # re-seals everything with the final identity.
 echo "==> Bundling Homebrew dylibs into the app (self-contained)"
 "$REPO_ROOT/scripts/bundle-dylibs.sh" "$MACOS_DIR" \
-    libcdj3k-emu-qemu.dylib qemu-img cdj3k-emu socket_vmnet
+    libcdj3k-emu-qemu.dylib qemu-img cdj3k-emu
 # Nothing in Contents/MacOS may still name a path outside the bundle or the
 # OS: a leftover /opt/homebrew reference is a crash on a clean machine.
 # (`grep -v` exits 1 when nothing is stray, which `set -e -o pipefail` would

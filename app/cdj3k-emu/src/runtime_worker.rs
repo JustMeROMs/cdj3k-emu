@@ -8,19 +8,19 @@ use cdj3k_emu_platform::menu_state::{APP_SHUTDOWN, NO_USB_MOUNTED};
 use cdj3k_emu_platform::menu_state;
 use cdj3k_emu_runtime::{
     register_worker_thread, CfgClient, DiskProvider, MacOsDiskProvider, QemuConfig, QemuInstance,
-    SocketVmnet, TapBridge, UsbManager,
+    TapBridge, UsbManager, VmnetMode,
 };
 
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 const DISK_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 const NET_REFRESH_INTERVAL: Duration = Duration::from_secs(3);
 
-/// Pre-built network backends, set up before the very first QEMU spawn so
-/// the initial process already has the right `-netdev`. The worker holds
-/// them for its lifetime - Drop tears down the bridge / vmnet daemon.
+/// Pre-built network backend, set up before the very first QEMU spawn so the
+/// initial process already has the right `-netdev`. The worker holds it for
+/// its lifetime - Drop tears the bridge down.  vmnet needs nothing here: QEMU
+/// opens the interface itself and releases it when it exits.
 pub struct PrebuiltNet {
     pub tap_bridge: Option<TapBridge>,
-    pub vmnet: Option<SocketVmnet>,
     /// Initial value to seed `prev_net_idx` with so the worker doesn't
     /// trigger a restart on the first poll iteration.
     pub initial_net_idx: u32,
@@ -42,18 +42,13 @@ fn run(mut instance: Option<QemuInstance>, mut config: QemuConfig, prebuilt_net:
     let mut phys_disks: Vec<cdj3k_emu_runtime::PhysicalDisk> = Vec::new();
     let mut last_disk_refresh = Instant::now() - DISK_REFRESH_INTERVAL;
 
-    // Network backends: own them here so Drop fires on app exit (worker breaks
-    // out of the loop, function returns, locals drop) and on iface change
-    // (`= None;` drops the previous Some).  TapBridge::Drop tears down the
-    // host TAP; SocketVmnet::Drop releases this instance's lease on the
-    // shared daemon, whose root-side watchdog (spawned alongside socket_vmnet)
-    // reaps it once no lease is live - the user-level process can't kill it
-    // directly.  Sockets and directories are removed in one place only:
-    // `cleanup_runtime_files` on process exit.
+    // TAP bridge: owned here so Drop fires on app exit (worker breaks out of
+    // the loop, function returns, locals drop) and on iface change (`= None;`
+    // drops the previous Some), tearing down the host TAP.  Sockets and
+    // directories are removed in one place only: `cleanup_runtime_files` on
+    // process exit.
     #[allow(unused_assignments)]
     let mut _active_tap_bridge: Option<TapBridge> = prebuilt_net.tap_bridge;
-    #[allow(unused_assignments)]
-    let mut _active_vmnet: Option<SocketVmnet> = prebuilt_net.vmnet;
     let mut prev_net_idx: u32 = prebuilt_net.initial_net_idx;
     let mut last_phys_toggle: i32 = -1;
     let mut last_net_refresh = Instant::now() - NET_REFRESH_INTERVAL;
@@ -283,30 +278,13 @@ fn run(mut instance: Option<QemuInstance>, mut config: QemuConfig, prebuilt_net:
         if req.selected_iface != prev_net_idx {
             prev_net_idx = req.selected_iface;
             _active_tap_bridge = None;
-            _active_vmnet = None;
-            config.net_socket_vmnet = None;
+            config.net_vmnet = None;
             config.net_tap_iface = None;
             config.net_tap_fd = None;
 
             if req.selected_iface == menu_state::NET_SEL_VMNET_HOST {
-                match SocketVmnet::start_host() {
-                    Ok(sv) => {
-                        eprintln!(
-                            "cdj3k-emu: vmnet host-only up  socket={}",
-                            sv.socket_path().display()
-                        );
-                        config.net_socket_vmnet = Some(sv.socket_path().to_path_buf());
-                        _active_vmnet = Some(sv);
-                    }
-                    Err(e) => {
-                        let msg = format!("vmnet host-only start failed: {e}");
-                        eprintln!("cdj3k-emu: {msg}");
-                        let mut s = menu_state::lock();
-                        s.selected_interface = menu_state::NET_SEL_NONE;
-                        s.net_error_message = Some(msg);
-                        prev_net_idx = menu_state::NET_SEL_NONE;
-                    }
-                }
+                eprintln!("cdj3k-emu: vmnet host-only selected");
+                config.net_vmnet = Some(VmnetMode::Host);
             } else if req.selected_iface != menu_state::NET_SEL_NONE {
                 let iface_name = menu_state::lock()
                     .net_ifaces
@@ -329,26 +307,16 @@ fn run(mut instance: Option<QemuInstance>, mut config: QemuConfig, prebuilt_net:
                                 prev_net_idx = menu_state::NET_SEL_NONE;
                             }
                         }
+                    } else if let Some(mode) = VmnetMode::bridged(&name) {
+                        eprintln!("cdj3k-emu: vmnet bridged on {name}");
+                        config.net_vmnet = Some(mode);
                     } else {
-                        match SocketVmnet::start_bridged(&name) {
-                            Ok(sv) => {
-                                eprintln!(
-                                    "cdj3k-emu: vmnet up on {}  socket={}",
-                                    name,
-                                    sv.socket_path().display()
-                                );
-                                config.net_socket_vmnet = Some(sv.socket_path().to_path_buf());
-                                _active_vmnet = Some(sv);
-                            }
-                            Err(e) => {
-                                let msg = format!("vmnet start failed: {e}");
-                                eprintln!("cdj3k-emu: {msg}");
-                                let mut s = menu_state::lock();
-                                s.selected_interface = menu_state::NET_SEL_NONE;
-                                s.net_error_message = Some(msg);
-                                prev_net_idx = menu_state::NET_SEL_NONE;
-                            }
-                        }
+                        let msg = format!("invalid interface name: {name:?}");
+                        eprintln!("cdj3k-emu: {msg}");
+                        let mut s = menu_state::lock();
+                        s.selected_interface = menu_state::NET_SEL_NONE;
+                        s.net_error_message = Some(msg);
+                        prev_net_idx = menu_state::NET_SEL_NONE;
                     }
                 }
             }

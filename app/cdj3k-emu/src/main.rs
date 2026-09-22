@@ -168,7 +168,7 @@ fn main() {
     //                         three files exist (wizard provisions them first)
     #[cfg(target_os = "macos")]
     {
-        use cdj3k_emu_runtime::{QemuConfig, QemuInstance, SocketVmnet, TapBridge};
+        use cdj3k_emu_runtime::{QemuConfig, QemuInstance, TapBridge, VmnetMode};
 
         let instance_dir = cdj3k_emu_storage::emmc::default_path(instance)
             .parent()
@@ -238,14 +238,13 @@ fn main() {
         config.serial_log = serial_log;
 
         // ── Pre-build network backend ────────────────────────────────────────
-        // If a saved network interface is available, set up the TAP bridge or
-        // socket_vmnet daemon before the very first QEMU spawn so the initial
+        // If a saved network interface is available, select the vmnet mode or
+        // set up the TAP bridge before the very first QEMU spawn so the initial
         // process already has the right -netdev and we don't have to restart
         // immediately.  prev_net_idx in the worker is seeded from this value
         // so the first poll iteration is a no-op for network setup.
         let mut prebuilt_net = runtime_worker::PrebuiltNet {
             tap_bridge: None,
-            vmnet: None,
             initial_net_idx: cdj3k_emu_platform::menu_state::NET_SEL_NONE,
         };
         let (initial_net_idx, iface_name) = {
@@ -259,22 +258,9 @@ fn main() {
             (idx, name)
         };
         if initial_net_idx == cdj3k_emu_platform::menu_state::NET_SEL_VMNET_HOST {
-            match SocketVmnet::start_host() {
-                Ok(sv) => {
-                    eprintln!(
-                        "cdj3k-emu: vmnet host-only up  socket={}",
-                        sv.socket_path().display()
-                    );
-                    config.net_socket_vmnet = Some(sv.socket_path().to_path_buf());
-                    prebuilt_net.vmnet = Some(sv);
-                    prebuilt_net.initial_net_idx = initial_net_idx;
-                }
-                Err(e) => {
-                    eprintln!("cdj3k-emu: initial vmnet host-only start failed: {e}");
-                    cdj3k_emu_platform::menu_state::lock().selected_interface =
-                        cdj3k_emu_platform::menu_state::NET_SEL_NONE;
-                }
-            }
+            eprintln!("cdj3k-emu: vmnet host-only selected");
+            config.net_vmnet = Some(VmnetMode::Host);
+            prebuilt_net.initial_net_idx = initial_net_idx;
         }
         if let Some(name) = iface_name {
             if name.starts_with("tap") {
@@ -291,24 +277,14 @@ fn main() {
                             cdj3k_emu_platform::menu_state::NET_SEL_NONE;
                     }
                 }
+            } else if let Some(mode) = VmnetMode::bridged(&name) {
+                eprintln!("cdj3k-emu: vmnet bridged on {name}");
+                config.net_vmnet = Some(mode);
+                prebuilt_net.initial_net_idx = initial_net_idx;
             } else {
-                match SocketVmnet::start_bridged(&name) {
-                    Ok(sv) => {
-                        eprintln!(
-                            "cdj3k-emu: vmnet up on {}  socket={}",
-                            name,
-                            sv.socket_path().display()
-                        );
-                        config.net_socket_vmnet = Some(sv.socket_path().to_path_buf());
-                        prebuilt_net.vmnet = Some(sv);
-                        prebuilt_net.initial_net_idx = initial_net_idx;
-                    }
-                    Err(e) => {
-                        eprintln!("cdj3k-emu: initial vmnet start failed: {e}");
-                        cdj3k_emu_platform::menu_state::lock().selected_interface =
-                            cdj3k_emu_platform::menu_state::NET_SEL_NONE;
-                    }
-                }
+                eprintln!("cdj3k-emu: invalid saved interface name: {name:?}");
+                cdj3k_emu_platform::menu_state::lock().selected_interface =
+                    cdj3k_emu_platform::menu_state::NET_SEL_NONE;
             }
         }
 

@@ -43,9 +43,10 @@ pub struct QemuConfig {
     /// p7 = settings (/home/root/settings), p8 = user data (/mnt).
     pub emmc_img: Option<PathBuf>,
 
-    /// socket_vmnet Unix socket for bridged Pro DJ Link on physical interfaces.
-    /// QEMU connects via `-netdev stream,addr.type=unix,addr.path=<sock>`.
-    pub net_socket_vmnet: Option<PathBuf>,
+    /// vmnet backend for Pro DJ Link.  QEMU opens the interface itself via
+    /// `-netdev vmnet-host` / `vmnet-bridged`, unprivileged under the
+    /// `com.apple.developer.networking.vmnet` entitlement.
+    pub net_vmnet: Option<crate::vmnet::VmnetMode>,
 
     /// TAP interface name - informational only (e.g. for logs/display).
     pub net_tap_iface: Option<String>,
@@ -93,7 +94,7 @@ impl QemuConfig {
             service_mode: false,
             mods_enabled: false,
             emmc_img: None,
-            net_socket_vmnet: None,
+            net_vmnet: None,
             net_tap_iface: None,
             net_tap_fd: None,
             qmp_port: 4445,
@@ -287,13 +288,10 @@ impl QemuConfig {
                 "-device".into(),
                 format!("virtio-net-device,netdev=net0,mac={},mrg_rxbuf=off", mac),
             ]);
-        } else if let Some(sock) = &self.net_socket_vmnet {
+        } else if let Some(mode) = &self.net_vmnet {
             args.extend([
                 "-netdev".into(),
-                format!(
-                    "stream,id=net0,server=off,addr.type=unix,addr.path={}",
-                    sock.display()
-                ),
+                mode.netdev_arg("net0"),
                 "-device".into(),
                 format!("virtio-net-device,netdev=net0,mac={},mrg_rxbuf=off", mac),
             ]);
