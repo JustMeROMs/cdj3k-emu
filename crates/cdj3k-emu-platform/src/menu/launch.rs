@@ -40,7 +40,7 @@ pub(super) fn launch_instance(target: u32) {
 }
 
 /// Show a non-blocking error popup for a network setup failure
-/// (socket_vmnet / tapbridge).  Single OK button - user picks a different
+/// (vmnet / tapbridge).  Single OK button - user picks a different
 /// interface from the menu to retry.
 pub(super) fn show_net_error_alert(message: &str) {
     let _ = rfd::MessageDialog::new()

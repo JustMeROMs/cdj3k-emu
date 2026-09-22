@@ -33,7 +33,7 @@ pub const NET_SEL_NONE: u32 = u32::MAX;
 
 /// Sentinel value for [`AppState::selected_interface`] meaning "vmnet host-only
 /// network" (menu's "Host-only (link-local)" entry). All instances selecting this
-/// attach to the same `socket_vmnet --vmnet-mode=host` daemon, sharing a
+/// open a `vmnet-host` interface under one shared network UUID, giving a
 /// host-side `bridgeN` interface that vmnet.framework creates. Pure L2,
 /// host-sniffable in Wireshark with no encapsulation. The daemon runs with
 /// `--vmnet-network-identifier`, so the segment has no DHCP server: guests

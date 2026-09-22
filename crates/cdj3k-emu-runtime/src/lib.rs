@@ -24,4 +24,4 @@ pub use qmp::{QmpClient, QmpError};
 pub use shutdown::{register_worker_thread, wait_for_worker, worker_is_finished};
 pub use tapbridge::TapBridge;
 pub use usb::{DiskProvider, MacOsDiskProvider, PhysicalDisk, UsbError, UsbManager};
-pub use vmnet::SocketVmnet;
+pub use vmnet::VmnetMode;

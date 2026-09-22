@@ -1,7 +1,7 @@
 Cargo.lock
 # Compiled guest binaries (all outputs land in guest/out/)
 guest/out/
-# Build workspace (includes build/cache/ — see bundle.sh socket_vmnet cache)
+# Build workspace (includes build/cache/)
 build/
 # macOS metadata
 *.DS_Store
@@ -27,3 +27,7 @@ app/cdj3k-emu/assets/*
 !app/cdj3k-emu/assets/icon*
 !app/cdj3k-emu/assets/*.icns
 !app/cdj3k-emu/assets/*.otf
+
+# Apple provisioning profile authorising the restricted entitlements
+# (vmnet, virtual HID).  Team-specific; supply your own via --profile.
+*.provisionprofile

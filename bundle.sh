@@ -5,7 +5,7 @@
 # Usage:
 #   ./bundle.sh [--debug] [--no-build] [--out DIR] [--sign IDENTITY] [--dmg]
 #               [--version VERSION] [--build BUILD]
-#               [--notarize] [--notary-profile NAME]
+#               [--notarize] [--notary-profile NAME] [--profile PATH]
 #
 #   --debug          build debug profile (default: release)
 #   --no-build       skip cargo build; reuse last build output
@@ -13,6 +13,12 @@
 #   --sign IDENTITY  codesign identity string (overrides CODESIGN_IDENTITY env var)
 #                    Use "Apple Development" to pick your only dev cert automatically.
 #                    Falls back to ad-hoc (-) when omitted - TCC/FDA will not work.
+#   --profile PATH   Apple provisioning profile authorising the restricted
+#                    entitlements (vmnet, virtual HID).  Default:
+#                    ./cdj3k-emu.provisionprofile; PROVISION_PROFILE env var
+#                    overrides.  Copied to Contents/embedded.provisionprofile and
+#                    its granted entitlements are added to the signature.  Without
+#                    it the bundle signs with the free entitlements only.
 #   --dmg            after bundling, package the .app into a compressed .dmg
 #                    image alongside it (matches CFBundleShortVersionString).
 #   --version VER    CFBundleShortVersionString to embed (default: 0.1.2).
@@ -38,7 +44,7 @@
 # The script:
 #   1. Builds tools/cdj3k-emu with cargo
 #   2. Creates cdj3k-emu.app/Contents/{MacOS,Resources}
-#   3. Copies cdj3k-emu, libcdj3k-emu-qemu.dylib, qemu-img, socket_vmnet into Contents/MacOS
+#   3. Copies cdj3k-emu, libcdj3k-emu-qemu.dylib and qemu-img into Contents/MacOS
 #   4. Populates Contents/Resources: modules/*.ko, patch/, tools/, assets/
 #   5. Writes Info.plist
 #   6. Bundles the Homebrew dylib graph next to the binaries (@loader_path) so
@@ -80,6 +86,7 @@ APP_VERSION="0.1.2"
 APP_BUILD="1"
 NOTARIZE=0
 NOTARY_PROFILE="${NOTARY_PROFILE:-cdj3k-emu-notarization}"
+PROVISION_PROFILE="${PROVISION_PROFILE:-$REPO_ROOT/cdj3k-emu.provisionprofile}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -97,6 +104,8 @@ while [[ $# -gt 0 ]]; do
         --notarize)   NOTARIZE=1 ;;
         --notary-profile=*) NOTARY_PROFILE="${1#--notary-profile=}" ;;
         --notary-profile)   NOTARY_PROFILE="$2"; shift ;;
+        --profile=*)  PROVISION_PROFILE="${1#--profile=}" ;;
+        --profile)    PROVISION_PROFILE="$2"; shift ;;
         -h|--help)    sed -n '3,/^$/p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *)            echo "ERROR: unknown argument: $1" >&2; exit 1 ;;
     esac
@@ -128,18 +137,6 @@ QEMU_IMG="$REPO_ROOT/qemu/install/bin/qemu-img"
 APP_DIR="$OUT_DIR/CDJ3K Emulator.app"
 MACOS_DIR="$APP_DIR/Contents/MacOS"
 RESOURCES_DIR="$APP_DIR/Contents/Resources"
-
-SOCKET_VMNET_VERSION="1.2.2"
-SOCKET_VMNET_URL="https://github.com/lima-vm/socket_vmnet/releases/download/v${SOCKET_VMNET_VERSION}/socket_vmnet-${SOCKET_VMNET_VERSION}-arm64.tar.gz"
-# SHA-256 of the upstream arm64 release tarball.  Verified by running:
-#   shasum -a 256 socket_vmnet-1.2.2-arm64.tar.gz
-# against the asset linked from the v1.2.2 GitHub release notes.
-SOCKET_VMNET_SHA256="c7bf62308fbcfdc29bdfb8373c9b1951f7ac2396446e4390919796a94972e6dc"
-# Cached archive lives under build/ (gitignored).  Re-used across bundle runs
-# so a clean build doesn't re-download the same tarball; the SHA-256 check
-# below guards against a corrupted or tampered cache.
-SOCKET_VMNET_CACHE_DIR="$REPO_ROOT/build/cache"
-SOCKET_VMNET_CACHE_FILE="$SOCKET_VMNET_CACHE_DIR/socket_vmnet-${SOCKET_VMNET_VERSION}-arm64.tar.gz"
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 if [[ "$DO_BUILD" -eq 1 ]]; then
@@ -175,44 +172,6 @@ if [[ ! -f "$QEMU_IMG" ]]; then
 fi
 cp "$QEMU_IMG" "$MACOS_DIR/qemu-img"
 echo "     bundled qemu-img"
-
-echo "==> Fetching socket_vmnet ${SOCKET_VMNET_VERSION}"
-mkdir -p "$SOCKET_VMNET_CACHE_DIR"
-verify_socket_vmnet_sha() {
-    local f="$1"
-    local actual
-    actual=$(shasum -a 256 "$f" | awk '{print $1}')
-    [[ "$actual" == "$SOCKET_VMNET_SHA256" ]]
-}
-if [[ -f "$SOCKET_VMNET_CACHE_FILE" ]] && verify_socket_vmnet_sha "$SOCKET_VMNET_CACHE_FILE"; then
-    echo "     reusing cached archive: $SOCKET_VMNET_CACHE_FILE"
-else
-    if [[ -f "$SOCKET_VMNET_CACHE_FILE" ]]; then
-        echo "     cached archive failed SHA-256 verification; re-downloading"
-        rm -f "$SOCKET_VMNET_CACHE_FILE"
-    fi
-    curl -fsSL "$SOCKET_VMNET_URL" -o "$SOCKET_VMNET_CACHE_FILE"
-    if ! verify_socket_vmnet_sha "$SOCKET_VMNET_CACHE_FILE"; then
-        echo "ERROR: socket_vmnet archive SHA-256 mismatch"
-        echo "       expected: $SOCKET_VMNET_SHA256"
-        echo "       got:      $(shasum -a 256 "$SOCKET_VMNET_CACHE_FILE" | awk '{print $1}')"
-        rm -f "$SOCKET_VMNET_CACHE_FILE"
-        exit 1
-    fi
-fi
-SOCKET_VMNET_TMP=$(mktemp -d)
-TMP_CLEANUP+=("$SOCKET_VMNET_TMP")
-tar -xz -f "$SOCKET_VMNET_CACHE_FILE" -C "$SOCKET_VMNET_TMP"
-SOCKET_VMNET_BIN=$(find "$SOCKET_VMNET_TMP" -name "socket_vmnet" -type f | head -1)
-if [[ -z "$SOCKET_VMNET_BIN" ]]; then
-    echo "ERROR: socket_vmnet binary not found in release tarball"
-    rm -rf "$SOCKET_VMNET_TMP"
-    exit 1
-fi
-cp "$SOCKET_VMNET_BIN" "$MACOS_DIR/socket_vmnet"
-chmod +x "$MACOS_DIR/socket_vmnet"
-rm -rf "$SOCKET_VMNET_TMP"
-echo "     bundled socket_vmnet"
 
 # ── Resources: modules, patch scripts, guest tools, PPM assets ───────────────
 #
@@ -393,10 +352,11 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
     <key>com.apple.security.hypervisor</key>
     <true/>
 
-    <!-- NOTE: com.apple.vm.networking is intentionally absent.
-         Bridged Pro DJ Link is handled by the bundled socket_vmnet helper
-         (github.com/lima-vm/socket_vmnet), which runs as root via a native
-         macOS admin password dialog.  No vm.networking entitlement needed. -->
+    <!-- Entitlements that matter live in the code signature, not here; this
+         key is informational.  The restricted ones (vmnet, virtual HID) come
+         from Contents/embedded.provisionprofile - see the codesign step.
+         Pro DJ Link networking is QEMU's own -netdev vmnet-bridged /
+         vmnet-host, which vmnet authorises through that entitlement. -->
 </dict>
 </plist>
 PLIST
@@ -409,7 +369,7 @@ PLIST
 # re-seals everything with the final identity.
 echo "==> Bundling Homebrew dylibs into the app (self-contained)"
 "$REPO_ROOT/scripts/bundle-dylibs.sh" "$MACOS_DIR" \
-    libcdj3k-emu-qemu.dylib qemu-img cdj3k-emu socket_vmnet
+    libcdj3k-emu-qemu.dylib qemu-img cdj3k-emu
 # Nothing in Contents/MacOS may still name a path outside the bundle or the
 # OS: a leftover /opt/homebrew reference is a crash on a clean machine.
 # (`grep -v` exits 1 when nothing is stray, which `set -e -o pipefail` would
@@ -441,9 +401,56 @@ fi
 #   it will never appear in the FDA list and physical USB passthrough
 #   will be denied by macOS even if the user is in the operator group.
 
-HVF_ENT=$(mktemp -t hvf-entitlement)
+# Restricted entitlements (vmnet, virtual HID) only take effect when an
+# Apple-issued provisioning profile authorising them sits at
+# Contents/embedded.provisionprofile.  AMFI kills the process at launch if the
+# signature carries a restricted key the profile does not grant, so the keys
+# below are read back out of the profile: the signature is a subset of the
+# grant by construction.
+PROFILE_ENT=""
+if [[ -f "$PROVISION_PROFILE" ]]; then
+    echo "==> Provisioning profile: $PROVISION_PROFILE"
+    PROFILE_PLIST=$(mktemp -t provisionprofile)
+    TMP_CLEANUP+=("$PROFILE_PLIST")
+    if ! security cms -D -i "$PROVISION_PROFILE" -o "$PROFILE_PLIST" 2>/dev/null; then
+        echo "ERROR: could not decode provisioning profile: $PROVISION_PROFILE" >&2
+        exit 1
+    fi
+    # The profile's App ID must match CFBundleIdentifier or the signature is
+    # rejected; catching it here beats a launch-time AMFI kill with no message.
+    PROFILE_APPID=$(/usr/libexec/PlistBuddy -c \
+        "Print :Entitlements:com.apple.application-identifier" "$PROFILE_PLIST" 2>/dev/null || echo "")
+    if [[ "$PROFILE_APPID" != *".com.cdj3k.emu" ]]; then
+        echo "ERROR: profile App ID '$PROFILE_APPID' does not match com.cdj3k.emu" >&2
+        exit 1
+    fi
+    # keychain-access-groups is deliberately not carried over: the app does not
+    # use the keychain, and claiming a group changes its keychain scope.
+    for key in com.apple.application-identifier \
+               com.apple.developer.team-identifier \
+               com.apple.developer.hid.virtual.device \
+               com.apple.developer.networking.vmnet; do
+        val=$(/usr/libexec/PlistBuddy -c "Print :Entitlements:$key" "$PROFILE_PLIST" 2>/dev/null) || continue
+        case "$val" in
+            true)  PROFILE_ENT+="    <key>$key</key>"$'\n'"    <true/>"$'\n' ;;
+            false) ;;
+            *)     PROFILE_ENT+="    <key>$key</key>"$'\n'"    <string>$val</string>"$'\n' ;;
+        esac
+        echo "     granted: $key"
+    done
+    cp "$PROVISION_PROFILE" "$APP_DIR/Contents/embedded.provisionprofile"
+else
+    echo "==> No provisioning profile at $PROVISION_PROFILE"
+    echo "     signing with the free entitlements only - vmnet and virtual HID"
+    echo "     will be unavailable.  Pass --profile PATH to include them."
+fi
+
+HVF_ENT=$(mktemp -t cdj3k-entitlements)
 TMP_CLEANUP+=("$HVF_ENT")
-cat > "$HVF_ENT" <<'ENT'
+# allow-jit: the bundled QEMU imports pthread_jit_write_protect_np for its TCG
+# backend (CDJ3K_EMU_TCG=1 selects it over HVF).  Under the hardened runtime
+# that API needs the entitlement or the JIT mapping fails.  Free - no profile.
+cat > "$HVF_ENT" <<ENT
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
     "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -451,7 +458,9 @@ cat > "$HVF_ENT" <<'ENT'
 <dict>
     <key>com.apple.security.hypervisor</key>
     <true/>
-</dict>
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+${PROFILE_ENT}</dict>
 </plist>
 ENT
 
@@ -459,7 +468,7 @@ if [[ -n "$SIGN_IDENTITY" ]]; then
     echo "==> Codesigning bundle (identity: $SIGN_IDENTITY)"
     # Deep-sign all nested binaries first (no entitlements on helpers/dylibs).
     codesign --force --deep --options runtime --timestamp --sign "$SIGN_IDENTITY" "$APP_DIR"
-    # Re-sign the main binary with HVF entitlement — --deep would have stripped it.
+    # --deep strips entitlements; the main binary is signed again here.
     codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" \
         --entitlements "$HVF_ENT" "$MACOS_DIR/cdj3k-emu"
     codesign --verify --deep --strict "$APP_DIR"
@@ -470,7 +479,7 @@ else
     echo "==> Codesigning bundle (ad-hoc - TCC/FDA will not work)"
     echo "     Pass --sign \"Apple Development\" or set CODESIGN_IDENTITY to enable FDA."
     codesign --force --deep --sign - "$APP_DIR"
-    # Re-sign CDJ3K Emulator with HVF entitlement AFTER --deep (deep would strip it).
+    # --deep strips entitlements; CDJ3K Emulator is signed again after it.
     codesign --force --sign - --entitlements "$HVF_ENT" "$MACOS_DIR/cdj3k-emu"
 fi
 
