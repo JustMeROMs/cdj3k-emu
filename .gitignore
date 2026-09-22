@@ -27,3 +27,7 @@ app/cdj3k-emu/assets/*
 !app/cdj3k-emu/assets/icon*
 !app/cdj3k-emu/assets/*.icns
 !app/cdj3k-emu/assets/*.otf
+
+# Apple provisioning profile authorising the restricted entitlements
+# (vmnet, virtual HID).  Team-specific; supply your own via --profile.
+*.provisionprofile
