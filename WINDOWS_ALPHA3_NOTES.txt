@@ -1,0 +1,20 @@
+CDJ3K Emulator Windows Port - Alpha 3
+=====================================
+
+Alpha 3 adds CI-built ARM64 guest runtime resources to the Windows artifact.
+
+New in this build:
+- GitHub Actions builds the public Linux 6.6 ARM64 kernel used by the emulator.
+- Builds and packages the required out-of-tree guest kernel modules.
+- Builds and packages the guest helper binaries and EP122 shim.
+- Packages the rootfs patch scripts/assets next to cdj3k-emu.exe under resources/.
+- Windows artifact now contains enough guest-side resources for the firmware
+  wizard to get past the previous "missing bundled Image/resources" stage.
+
+Still NOT complete:
+- The current initramfs patcher still invokes Unix bash/cpio/find semantics.
+  A Windows-native patcher (or temporary compatibility layer) is the next task.
+- Patched qemu-system-aarch64.exe and qemu-img.exe are not bundled yet.
+- Main/jog shared-memory backends still need their Win32 QEMU port.
+
+Never commit or upload Pioneer firmware (.UPD) or decryption keys to GitHub.

@@ -1,28 +1,32 @@
 # Windows Port Status
 
-Baseline: upstream cdj3k-emu 0.1.2.
-Target: Windows 10/11 x64 first, ARM64/WHPX later.
+## Completed
 
-## Alpha 1 changes
+- Windows 10/11 x64 Rust frontend compiles in GitHub Actions.
+- Windows application launches and opens the firmware wizard.
+- Windows paths and process termination are implemented.
+- Windows QEMU audio argument uses DirectSound for the initial port.
+- Guest ARM64 kernel/modules/tools are now built by CI and staged into the Windows artifact.
 
-1. Portable temp/runtime directory handling.
-2. Windows `%LOCALAPPDATA%` storage root.
-3. External QEMU process lifecycle on non-macOS hosts.
-4. Windows process force-termination fallback via `taskkill`.
-5. Windows TCP transport for `ctrl` and `cfg` virtio serial channels.
-6. QEMU DirectSound audio backend selection on Windows.
-7. macOS-only vmnet/TAP code isolated behind stubs on Windows.
-8. Windows application bootstrap added.
-9. GitHub Actions Windows compile/build workflow added.
+## Current milestone
 
-## Next milestones
+Make firmware provisioning self-contained on Windows:
 
-- Get green `cargo check --workspace` on `windows-latest` and fix compiler errors exposed by CI.
-- Build patched QEMU for Windows and exclude macOS-only patches (`coreaudio`, HVF/QoS).
-- Validate `display=shm` on Windows and main LCD mmap reader.
-- Validate ivshmem jog LCD.
-- Boot one CDJ firmware instance end-to-end.
-- Replace DirectSound with WASAPI if latency/stability warrants it.
-- Implement Windows USB media handling.
-- Implement Pro DJ Link networking on Windows (likely TAP/WinPcap/Npcap or a dedicated L2 bridge helper).
-- Package app + patched QEMU into a single portable zip/installer.
+1. decrypt user-supplied `.UPD` (already pure Rust)
+2. extract firmware/kernel (already Rust)
+3. extract embedded initramfs (already Rust)
+4. replace Unix `bash`/`find`/`cpio` patching with a Windows-compatible implementation
+5. create eMMC image using bundled `qemu-img.exe`
+
+## Following milestone
+
+Build/port the project's patched QEMU to Windows and connect:
+
+- main LCD shared memory
+- jog LCD shared memory
+- control/config channels
+- audio
+- USB media
+- networking / Pro DJ Link
+
+Never commit Pioneer firmware or keys.

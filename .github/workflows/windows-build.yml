@@ -7,22 +7,75 @@ on:
   pull_request:
 
 jobs:
+  guest-assets:
+    name: Build Linux guest assets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Build ARM64 guest assets
+        run: |
+          rm -rf guest-assets-out
+          docker buildx build \
+            --platform linux/arm64 \
+            --provenance=false \
+            --target artifacts \
+            --output type=local,dest=guest-assets-out \
+            -f docker/Dockerfile .
+      - name: Stage runtime resources
+        run: |
+          set -eux
+          mkdir -p guest-resources/modules guest-resources/tools guest-resources/patch
+          cp guest-assets-out/Image guest-resources/Image
+          cp guest-assets-out/modules/*.ko guest-resources/modules/
+          cp guest-assets-out/ep122_shim.so guest-resources/tools/
+          cp guest-assets-out/subucom_forwarder_aarch64 guest-resources/tools/
+          cp guest-assets-out/subucom_live_aarch64 guest-resources/tools/
+          cp guest-assets-out/cfgd_aarch64 guest-resources/tools/
+          cp guest-assets-out/stemd_client_aarch64 guest-resources/tools/
+          cp -R initramfs-patch/. guest-resources/patch/
+          cp guest-assets-out/dummy_drv.so guest-resources/patch/dummy_drv.so
+          mkdir -p guest-resources/patch/vanilla-modules
+          cp guest-assets-out/modules/*.ko guest-resources/patch/vanilla-modules/
+          find guest-resources -maxdepth 3 -type f -print | sort
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cdj3k-emu-guest-resources
+          path: guest-resources/
+          retention-days: 7
+
   windows:
+    name: Build Windows frontend
+    needs: guest-assets
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
       - name: Cargo check workspace
         run: cargo check --workspace
       - name: Build Windows app
         run: cargo build --release -p cdj3k-emu
-      - name: Stage app
+      - uses: actions/download-artifact@v4
+        with:
+          name: cdj3k-emu-guest-resources
+          path: guest-resources
+      - name: Stage app and guest resources
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item target/release/cdj3k-emu.exe dist/
           Copy-Item windows/README-WINDOWS.md dist/
+          Copy-Item WINDOWS_PORT_STATUS.md dist/
+          Copy-Item -Recurse guest-resources dist/resources
+          Write-Host "Staged Windows package:"
+          Get-ChildItem -Recurse dist | Select-Object FullName,Length
       - uses: actions/upload-artifact@v4
         with:
           name: cdj3k-emu-windows-alpha
           path: dist/
+          retention-days: 14
