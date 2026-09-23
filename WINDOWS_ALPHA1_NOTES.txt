@@ -1,0 +1,3 @@
+This is working source for the first Windows port milestone, not a claim of a finished emulator binary.
+The host-side code has been modified for Windows and a Windows CI build is included.
+The critical remaining dependency is a Windows build of the project's patched QEMU backend.

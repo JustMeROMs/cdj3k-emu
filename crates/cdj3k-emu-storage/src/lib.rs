@@ -16,7 +16,11 @@ pub fn app_data_dir() -> PathBuf {
     let base = PathBuf::from(std::env::var("HOME").unwrap_or_default())
         .join("Library")
         .join("Application Support");
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    let base = std::env::var("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| std::env::temp_dir().join("cdj3k-emu-data"));
+    #[cfg(all(not(target_os = "macos"), not(windows)))]
     let base = std::env::var("XDG_DATA_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {

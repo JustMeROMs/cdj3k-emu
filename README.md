@@ -217,7 +217,7 @@ cdj3k-emu asks for the macOS admin password in three specific situations,
 
 | Action                                                          | Why it elevates                                                                                                                                                                                                        |
 | --------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Bridging a TAP interface (OpenVPN-style) for Pro DJ Link | Creates a macOS kernel bridge with `ifconfig`, which is root-only. vmnet modes need no prompt: QEMU opens the interface itself under the app's `com.apple.developer.networking.vmnet` entitlement. |
+| Selecting a physical Wi-Fi / Ethernet interface for Pro DJ Link | Starts the bundled `socket_vmnet` daemon as root — the only way to bridge an L2 network on macOS without writing a kernel extension. Re-used across instances; one prompt per host interface.                          |
 | Selecting a TAP interface (OpenVPN etc.)                        | Creates a macOS `bridge` device + assigns a `tap` device to QEMU via Authorization Services. Torn down automatically when the app exits.                                                                               |
 | Attaching a physical USB drive in pass-through mode             | `chmod 660` on `/dev/diskN` so QEMU can open it `O_RDWR`. The exact device path is validated against `/dev/disk[0-9]+(s[0-9]+)?` before elevation — see `crates/cdj3k-emu-runtime/src/usb.rs::is_valid_bsd_disk_path`. |
 

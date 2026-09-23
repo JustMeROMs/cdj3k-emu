@@ -1,0 +1,28 @@
+name: Windows build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "windows-port", "main" ]
+  pull_request:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cargo check workspace
+        run: cargo check --workspace
+      - name: Build Windows app
+        run: cargo build --release -p cdj3k-emu
+      - name: Stage app
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target/release/cdj3k-emu.exe dist/
+          Copy-Item windows/README-WINDOWS.md dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cdj3k-emu-windows-alpha
+          path: dist/

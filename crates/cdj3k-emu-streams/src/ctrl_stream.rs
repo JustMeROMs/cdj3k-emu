@@ -6,7 +6,10 @@
 //! `inject()` can send MISO frames from any thread.
 
 use std::io::{Read, Write};
-use std::os::unix::net::UnixStream;
+#[cfg(unix)]
+use std::os::unix::net::UnixStream as HostStream;
+#[cfg(windows)]
+use std::net::TcpStream as HostStream;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -38,7 +41,7 @@ impl LedState {
 
 pub struct CtrlStream {
     state: Arc<Mutex<Option<LedState>>>,
-    writer: Arc<Mutex<Option<UnixStream>>>,
+    writer: Arc<Mutex<Option<HostStream>>>,
     sock_path: PathBuf,
     /// Always reflects the most recently-received MOSI frame, regardless of
     /// the repaint-gating that controls `state`. Lets observers (e.g. the
@@ -53,7 +56,7 @@ impl CtrlStream {
     pub fn new(socket_dir: &str, gate: crate::RepaintGate) -> Self {
         let sock_path = PathBuf::from(socket_dir.trim_end_matches('/')).join("ctrl.sock");
         let state: Arc<Mutex<Option<LedState>>> = Arc::new(Mutex::new(None));
-        let writer: Arc<Mutex<Option<UnixStream>>> = Arc::new(Mutex::new(None));
+        let writer: Arc<Mutex<Option<HostStream>>> = Arc::new(Mutex::new(None));
         let latest_mosi: Arc<Mutex<[u8; 64]>> = Arc::new(Mutex::new([0u8; 64]));
 
         let state_clone = Arc::clone(&state);
@@ -120,10 +123,27 @@ impl CtrlStream {
     }
 }
 
+#[cfg(unix)]
+fn connect_host_stream(path: &std::path::Path) -> std::io::Result<HostStream> {
+    HostStream::connect(path)
+}
+
+#[cfg(windows)]
+fn connect_host_stream(path: &std::path::Path) -> std::io::Result<HostStream> {
+    let instance_id = path.parent()
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        .and_then(|n| n.strip_prefix("instance-"))
+        .and_then(|n| n.parse::<u16>().ok())
+        .unwrap_or(1);
+    let port = 46000u16.saturating_add(instance_id.saturating_mul(10)) + 1;
+    HostStream::connect(("127.0.0.1", port))
+}
+
 fn stream_loop(
     sock_path: PathBuf,
     state: Arc<Mutex<Option<LedState>>>,
-    writer: Arc<Mutex<Option<UnixStream>>>,
+    writer: Arc<Mutex<Option<HostStream>>>,
     latest_mosi: Arc<Mutex<[u8; 64]>>,
     gate: crate::RepaintGate,
 ) {
@@ -133,7 +153,7 @@ fn stream_loop(
     // for the entire pre-spawn or post-crash window.
     let mut failed_attempts: u32 = 0;
     loop {
-        match UnixStream::connect(&sock_path) {
+        match connect_host_stream(&sock_path) {
             Ok(stream) => {
                 eprintln!("[ctrl] connected to {}", sock_path.display());
                 failed_attempts = 0;
@@ -161,7 +181,7 @@ fn stream_loop(
 }
 
 fn read_loop(
-    mut stream: UnixStream,
+    mut stream: HostStream,
     state: &Arc<Mutex<Option<LedState>>>,
     latest_mosi: &Arc<Mutex<[u8; 64]>>,
     gate: &crate::RepaintGate,

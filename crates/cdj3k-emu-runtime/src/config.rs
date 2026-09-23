@@ -43,10 +43,9 @@ pub struct QemuConfig {
     /// p7 = settings (/home/root/settings), p8 = user data (/mnt).
     pub emmc_img: Option<PathBuf>,
 
-    /// vmnet backend for Pro DJ Link.  QEMU opens the interface itself via
-    /// `-netdev vmnet-host` / `vmnet-bridged`, unprivileged under the
-    /// `com.apple.developer.networking.vmnet` entitlement.
-    pub net_vmnet: Option<crate::vmnet::VmnetMode>,
+    /// socket_vmnet Unix socket for bridged Pro DJ Link on physical interfaces.
+    /// QEMU connects via `-netdev stream,addr.type=unix,addr.path=<sock>`.
+    pub net_socket_vmnet: Option<PathBuf>,
 
     /// TAP interface name - informational only (e.g. for logs/display).
     pub net_tap_iface: Option<String>,
@@ -87,14 +86,14 @@ impl QemuConfig {
             kernel,
             initramfs,
             // CDJ3K_EMU_TCG=1 in the environment selects TCG instead of HVF.
-            hvf: std::env::var_os("CDJ3K_EMU_TCG").is_none(),
+            hvf: cfg!(target_os = "macos") && std::env::var_os("CDJ3K_EMU_TCG").is_none(),
             shm: false,
             audio: false,
             audio_device_uid: None,
             service_mode: false,
             mods_enabled: false,
             emmc_img: None,
-            net_vmnet: None,
+            net_socket_vmnet: None,
             net_tap_iface: None,
             net_tap_fd: None,
             qmp_port: 4445,
@@ -126,6 +125,17 @@ impl QemuConfig {
     /// Created by QemuInstance::spawn; swapped live via QMP blockdev-change-medium.
     pub fn usb_placeholder_path(&self) -> PathBuf {
         self.sock_dir().join("usb.placeholder")
+    }
+
+    /// Stable localhost port used by Windows for virtio-serial streams.
+    /// Unix hosts continue to use per-instance Unix-domain sockets.
+    pub fn stream_tcp_port(&self, name: &str) -> u16 {
+        let base = 46000u16.saturating_add((self.instance_id as u16).saturating_mul(10));
+        match name {
+            "ctrl" => base + 1,
+            "cfg" => base + 2,
+            _ => base + 9,
+        }
     }
 
     /// Build the argv list to pass to cdj3k_emu_qemu_run.
@@ -236,9 +246,17 @@ impl QemuConfig {
             format!("tcp:localhost:{},server=on,wait=off", self.qmp_port),
         ]);
 
+        #[cfg(unix)]
         args.extend([
             "-object".into(),
             "rng-random,id=rng0,filename=/dev/urandom".into(),
+            "-device".into(),
+            "virtio-rng-device,rng=rng0".into(),
+        ]);
+        #[cfg(windows)]
+        args.extend([
+            "-object".into(),
+            "rng-builtin,id=rng0".into(),
             "-device".into(),
             "virtio-rng-device,rng=rng0".into(),
         ]);
@@ -257,12 +275,14 @@ impl QemuConfig {
             // pay latency we don't get any value for. Real fix is RT
             // scheduling for the HVF VCPU threads (see hvf-accel-ops
             // patch) so the guest's PCM thread can't be preempted.
-            let mut audiodev =
-                String::from("coreaudio,id=audio0,in.voices=0,out.buffer-length=5000");
+            #[cfg(target_os = "macos")]
+            let mut audiodev = String::from("coreaudio,id=audio0,in.voices=0,out.buffer-length=5000");
+            #[cfg(windows)]
+            let mut audiodev = String::from("dsound,id=audio0,in.voices=0,out.buffer-length=5000");
+            #[cfg(not(any(target_os = "macos", windows)))]
+            let mut audiodev = String::from("sdl,id=audio0,in.voices=0");
+            #[cfg(target_os = "macos")]
             if let Some(uid) = self.audio_device_uid.as_deref().filter(|s| !s.is_empty()) {
-                // CoreAudio UIDs contain ':', spaces, and other chars QEMU's
-                // -audiodev parser passes through untouched (it splits on
-                // ',' and '=' only); no escaping needed in practice.
                 audiodev.push_str(",out.device-uid=");
                 audiodev.push_str(uid);
             }
@@ -288,10 +308,13 @@ impl QemuConfig {
                 "-device".into(),
                 format!("virtio-net-device,netdev=net0,mac={},mrg_rxbuf=off", mac),
             ]);
-        } else if let Some(mode) = &self.net_vmnet {
+        } else if let Some(sock) = &self.net_socket_vmnet {
             args.extend([
                 "-netdev".into(),
-                mode.netdev_arg("net0"),
+                format!(
+                    "stream,id=net0,server=off,addr.type=unix,addr.path={}",
+                    sock.display()
+                ),
                 "-device".into(),
                 format!("virtio-net-device,netdev=net0,mac={},mrg_rxbuf=off", mac),
             ]);
@@ -311,15 +334,22 @@ impl QemuConfig {
                                    //   host→guest: usb attach|detach, set/get sysfs params
                                    //   guest→host: usb_state, param values, latency every 3s
         ] {
-            let sock_path = sock.join(format!("{}.sock", name));
-            args.extend([
-                "-chardev".into(),
-                format!(
-                    "socket,id=vserial_{},path={},server=on,wait=off",
-                    name,
-                    sock_path.display()
-                ),
-            ]);
+            #[cfg(unix)]
+            {
+                let sock_path = sock.join(format!("{}.sock", name));
+                args.extend([
+                    "-chardev".into(),
+                    format!("socket,id=vserial_{},path={},server=on,wait=off", name, sock_path.display()),
+                ]);
+            }
+            #[cfg(windows)]
+            {
+                let port = self.stream_tcp_port(name);
+                args.extend([
+                    "-chardev".into(),
+                    format!("socket,id=vserial_{},host=127.0.0.1,port={},server=on,wait=off", name, port),
+                ]);
+            }
             let mut dev = format!(
                 "virtserialport,chardev=vserial_{},name=cdj3k.{}",
                 name, name

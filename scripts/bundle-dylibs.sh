@@ -7,7 +7,7 @@
 #
 # <macos_dir>   the bundle's Contents/MacOS directory (where the binaries live).
 # <root>...     binaries/dylibs already inside <macos_dir> whose dependency graph
-#               should be bundled (e.g. cdj3k-emu, qemu-img,
+#               should be bundled (e.g. cdj3k-emu, qemu-img, socket_vmnet,
 #               libcdj3k-emu-qemu.dylib).
 #
 # For each root it walks the transitive `otool -L` dependency graph, copies every

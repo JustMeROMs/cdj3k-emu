@@ -1,6 +1,6 @@
 [package]
 name = "cdj3k-emu-platform"
-description = "macOS host integration: AppKit window/menu, CoreAudio enumeration, trackpad haptics, runtime paths."
+description = "Host integration for cdj3k-emu: desktop/menu, audio enumeration, haptics, and runtime paths."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

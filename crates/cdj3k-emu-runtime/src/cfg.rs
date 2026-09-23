@@ -23,7 +23,10 @@
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
+#[cfg(unix)]
+use std::os::unix::net::UnixStream as HostStream;
+#[cfg(windows)]
+use std::net::TcpStream as HostStream;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -58,7 +61,7 @@ struct Shared {
     /// Most recent `param <name> <value>` response per name.
     params: HashMap<String, String>,
     /// Writer half - `None` while disconnected.
-    writer: Option<UnixStream>,
+    writer: Option<HostStream>,
 }
 
 #[derive(Clone)]
@@ -156,7 +159,7 @@ impl CfgClient {
         // open because the reader thread owns the long-lived stream.
         let mut last_err: Option<std::io::Error> = None;
         for _ in 0..COLD_WRITER_RETRIES {
-            match UnixStream::connect(&self.sock_path) {
+            match connect_host_stream(&self.sock_path) {
                 Ok(mut s) => {
                     s.set_write_timeout(Some(COLD_WRITER_WRITE_TIMEOUT))?;
                     s.write_all(line.as_bytes())?;
@@ -173,9 +176,26 @@ impl CfgClient {
     }
 }
 
+#[cfg(unix)]
+fn connect_host_stream(path: &std::path::Path) -> std::io::Result<HostStream> {
+    HostStream::connect(path)
+}
+
+#[cfg(windows)]
+fn connect_host_stream(path: &std::path::Path) -> std::io::Result<HostStream> {
+    let instance_id = path.parent()
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        .and_then(|n| n.strip_prefix("instance-"))
+        .and_then(|n| n.parse::<u16>().ok())
+        .unwrap_or(1);
+    let port = 46000u16.saturating_add(instance_id.saturating_mul(10)) + 2;
+    HostStream::connect(("127.0.0.1", port))
+}
+
 fn reader_loop(sock_path: PathBuf, shared: Arc<Mutex<Shared>>) {
     loop {
-        let stream = match UnixStream::connect(&sock_path) {
+        let stream = match connect_host_stream(&sock_path) {
             Ok(s) => s,
             Err(_) => {
                 thread::sleep(RECONNECT_DELAY);

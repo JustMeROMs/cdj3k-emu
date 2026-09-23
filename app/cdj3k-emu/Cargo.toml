@@ -1,6 +1,6 @@
 [package]
 name = "cdj3k-emu"
-description = "macOS desktop app booting Pioneer CDJ-3000 firmware in QEMU with native window/menu."
+description = "Desktop app booting CDJ-3000 firmware in QEMU (macOS native backend; Windows port in progress)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

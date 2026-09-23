@@ -6,8 +6,16 @@ pub mod instance;
 mod macos_disk;
 pub mod qmp;
 pub mod shutdown;
+#[cfg(target_os = "macos")]
+pub mod tapbridge;
+#[cfg(not(target_os = "macos"))]
+#[path = "tapbridge_stub.rs"]
 pub mod tapbridge;
 pub mod usb;
+#[cfg(target_os = "macos")]
+pub mod vmnet;
+#[cfg(not(target_os = "macos"))]
+#[path = "vmnet_stub.rs"]
 pub mod vmnet;
 
 /// Re-exported from `cdj3k-emu-platform` so callers that already pull in
@@ -24,4 +32,4 @@ pub use qmp::{QmpClient, QmpError};
 pub use shutdown::{register_worker_thread, wait_for_worker, worker_is_finished};
 pub use tapbridge::TapBridge;
 pub use usb::{DiskProvider, MacOsDiskProvider, PhysicalDisk, UsbError, UsbManager};
-pub use vmnet::VmnetMode;
+pub use vmnet::SocketVmnet;

@@ -1,4 +1,5 @@
 use std::net::TcpStream;
+#[cfg(unix)]
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
@@ -37,27 +38,37 @@ const MAIN_SHM_PREFILL: u64 = 8 * 1024 * 1024;
 /// SIGTERM → up to [`SIGTERM_GRACE`] → SIGKILL.
 pub fn kill_qemu_child() {
     let pid = QEMU_CHILD_PID.load(Ordering::Relaxed);
-    if pid <= 0 {
-        return;
-    }
-    unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
-    let deadline = Instant::now() + SIGTERM_GRACE;
-    while Instant::now() < deadline {
-        if unsafe { libc::kill(pid as libc::pid_t, 0) } != 0 {
-            break; // process gone
+    if pid <= 0 { return; }
+    #[cfg(unix)]
+    {
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+        let deadline = Instant::now() + SIGTERM_GRACE;
+        while Instant::now() < deadline {
+            if unsafe { libc::kill(pid as libc::pid_t, 0) } != 0 { break; }
+            std::thread::sleep(SIGTERM_POLL);
         }
-        std::thread::sleep(SIGTERM_POLL);
+        #[cfg(unix)]
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+        #[cfg(windows)]
+        { let _ = std::process::Command::new("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"]).status(); }
     }
-    unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .status();
+    }
     QEMU_CHILD_PID.store(-1, Ordering::Relaxed);
 }
 
-/// Signal-safe child kill for use inside signal handlers (no sleep, no alloc).
+/// Immediate best-effort child termination.
 pub fn kill_qemu_child_now() {
     let pid = QEMU_CHILD_PID.load(Ordering::Relaxed);
-    if pid > 0 {
-        unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
-    }
+    if pid <= 0 { return; }
+    #[cfg(unix)]
+    unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL); }
+    #[cfg(windows)]
+    { let _ = std::process::Command::new("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"]).status(); }
 }
 
 use cdj3k_emu_platform::menu_state;
@@ -223,6 +234,55 @@ impl QemuInstance {
         })
     }
 
+
+    /// Windows/non-macOS backend: launch an external qemu-system-aarch64 process.
+    /// Set CDJ3K_QEMU_EXE to override discovery. The Windows bundle places QEMU
+    /// under `qemu\\qemu-system-aarch64.exe` next to cdj3k-emu.exe.
+    #[cfg(not(target_os = "macos"))]
+    pub fn spawn(config: QemuConfig) -> Result<Self, InstanceError> {
+        kill_stale(config.qmp_port, &config.sock_dir());
+        std::fs::create_dir_all(config.sock_dir()).map_err(InstanceError::SockDir)?;
+
+        if config.shm {
+            prefill_sparse(&config.shm_path(), crate::config::QemuConfig::MEM_BYTES)
+                .map_err(InstanceError::SockDir)?;
+        }
+        prefill_sparse(&config.sock_dir().join("main.shm"), MAIN_SHM_PREFILL)
+            .map_err(InstanceError::SockDir)?;
+        prefill_sparse(&config.jog_shm_path(), JOG_SHM_BYTES)
+            .map_err(InstanceError::SockDir)?;
+        let ph = config.usb_placeholder_path();
+        if !ph.exists() { prefill_sparse(&ph, 512).map_err(InstanceError::SockDir)?; }
+
+        let exe = external_qemu_exe().ok_or(InstanceError::DylibUnavailable)?;
+        let mut argv = config.build_argv();
+        if !argv.is_empty() { argv.remove(0); }
+        eprintln!("cdj3k-emu: spawning external QEMU: {} {}", exe.display(), argv.join(" "));
+        let mut child = std::process::Command::new(&exe)
+            .args(&argv)
+            .spawn()
+            .map_err(InstanceError::SockDir)?;
+        let pid = child.id();
+        QEMU_CHILD_PID.store(pid as i32, Ordering::Relaxed);
+        let running = Arc::new(AtomicBool::new(true));
+        let running_clone = running.clone();
+        let thread = std::thread::Builder::new()
+            .name(format!("qemu-monitor-{}", config.instance_id))
+            .spawn(move || {
+                let code = child.wait().ok().and_then(|s| s.code()).unwrap_or(-1);
+                eprintln!("cdj3k-emu: QEMU subprocess exited with code {code}");
+                running_clone.store(false, Ordering::Release);
+                code
+            })
+            .expect("failed to spawn QEMU monitor thread");
+        let qmp = QmpClient::connect_with_retry(config.qmp_port, Duration::from_secs(20))?;
+        Ok(Self {
+            inner: Inner { thread: Some(thread), qmp, pid, _emmc_lock: None },
+            config,
+            running,
+        })
+    }
+
     pub fn sock_dir(&self) -> PathBuf {
         self.config.sock_dir()
     }
@@ -267,7 +327,6 @@ impl QemuInstance {
     }
 
     /// Stop and restart with a new config.
-    #[cfg(target_os = "macos")]
     pub fn restart(&mut self, new_config: QemuConfig) -> Result<(), InstanceError> {
         self.stop();
         // Release the flock before spawn tries to re-acquire it on a new fd.
@@ -320,6 +379,27 @@ fn wait_or_kill(running: &Arc<AtomicBool>, pid: u32, timeout: Duration) {
     }
 }
 
+
+#[cfg(not(target_os = "macos"))]
+fn external_qemu_exe() -> Option<PathBuf> {
+    if let Some(v) = std::env::var_os("CDJ3K_QEMU_EXE") {
+        let p = PathBuf::from(v);
+        if p.exists() { return Some(p); }
+    }
+    if let Ok(self_exe) = std::env::current_exe() {
+        let dir = self_exe.parent().unwrap_or(Path::new("."));
+        #[cfg(windows)]
+        for p in [dir.join("qemu-system-aarch64.exe"), dir.join("qemu").join("qemu-system-aarch64.exe")] {
+            if p.exists() { return Some(p); }
+        }
+        #[cfg(not(windows))]
+        for p in [dir.join("qemu-system-aarch64"), PathBuf::from("/usr/bin/qemu-system-aarch64")] {
+            if p.exists() { return Some(p); }
+        }
+    }
+    None
+}
+
 /// Create (or truncate) `path` to be a sparse file of exactly `len` bytes.
 /// Used to prepare host-side mmaps so QEMU can map them at boot without
 /// `ftruncate` growing the file out from under any active reader.
@@ -353,8 +433,10 @@ fn kill_stale(qmp_port: u16, sock_dir: &Path) {
         // If still up, there's nothing more we can do without the PID.
     }
 
-    // Restart-safe variant: the sock dir itself survives so the next QEMU
-    // spawn reuses it.
+    // Use the restart-safe variant: SocketVmnet may already be live (set up
+    // before this spawn during a network change), and wiping its socket here
+    // would crash the daemon mid-restart. The vmnet sock is owned by
+    // SocketVmnet's own lifetime, never by the QEMU spawn cycle.
     cleanup_qemu_files_for_restart(sock_dir);
 }
 
@@ -367,8 +449,11 @@ pub static SHUTDOWN_SOCK_DIR: std::sync::OnceLock<std::path::PathBuf> = std::syn
 /// Reached from every exit path (eframe on_exit, signal handler, atexit).
 ///
 /// 1. Wipe this instance's sock dir registered via `SHUTDOWN_SOCK_DIR`.
-/// 2. Remove the per-UID runtime dir once it is empty (another slot's
-///    `instance-N` keeps it).
+/// 2. Drop this process's socket_vmnet leases; where no live lease remains,
+///    take the daemon's socket and `<sock>.clients/` with them.
+/// 3. Remove the per-UID runtime dir and the DJPL net dir once they are
+///    empty (another slot's `instance-N` or another interface's socket keeps
+///    them).
 ///
 /// Everything is idempotent and best-effort - safe to call repeatedly, and
 /// safe when nothing exists any more.
@@ -376,28 +461,53 @@ pub fn cleanup_runtime_files() {
     if let Some(dir) = SHUTDOWN_SOCK_DIR.get() {
         cleanup_qemu_files(dir);
     }
-    prune_shared_dirs(&cdj3k_emu_platform::runtime_paths::runtime_base_dir());
+    prune_shared_dirs(
+        &cdj3k_emu_platform::runtime_paths::runtime_base_dir(),
+        &cdj3k_emu_platform::runtime_paths::djpl_net_dir(),
+        std::process::id(),
+    );
 }
 
-/// Removes the per-UID runtime dir when nothing else is inside it; the
-/// non-recursive `remove_dir` fails while another slot's `instance-N` remains.
-fn prune_shared_dirs(base_dir: &Path) {
+/// Steps 2 and 3 of [`cleanup_runtime_files`], on explicit paths so a test can
+/// point them at a scratch tree.  `remove_dir` (non-recursive) is the
+/// "am I the last one" check for both trees: it fails, harmlessly, while
+/// anything else is still inside.
+fn prune_shared_dirs(base_dir: &Path, net_dir: &Path, own_pid: u32) {
+    if let Ok(entries) = std::fs::read_dir(net_dir) {
+        for entry in entries.flatten() {
+            let leases = entry.path();
+            let Some(name) = leases.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            let Some(sock_name) = name.strip_suffix(".clients") else {
+                continue;
+            };
+            let own = leases.join(own_pid.to_string());
+            let _ = std::fs::remove_file(&own);
+            if !crate::vmnet::other_clients_alive(&leases, &own) {
+                let _ = std::fs::remove_file(net_dir.join(sock_name));
+                let _ = std::fs::remove_dir_all(&leases);
+            }
+        }
+    }
+    let _ = std::fs::remove_dir(net_dir);
     let _ = std::fs::remove_dir(base_dir);
 }
 
 /// Remove the sock dir and everything inside it, plus the sibling ram.shm.
 /// Idempotent - safe to call when the directory does not exist.
 pub fn cleanup_qemu_files(sock_dir: &Path) {
-    cleanup_qemu_files_inner(sock_dir, /* keep_dir = */ false);
+    cleanup_qemu_files_inner(sock_dir, /* keep_vmnet = */ false);
 }
 
-/// Restart-time cleanup: empties the sock dir but keeps the directory, which
-/// the next QEMU spawn reuses.
+/// Restart-time cleanup: removes QEMU-managed files but preserves
+/// `vmnet-*.sock`, which is managed by `SocketVmnet`'s own lifetime and must
+/// outlive QEMU restarts (its daemon would exit if the socket vanished).
 pub fn cleanup_qemu_files_for_restart(sock_dir: &Path) {
-    cleanup_qemu_files_inner(sock_dir, /* keep_dir = */ true);
+    cleanup_qemu_files_inner(sock_dir, /* keep_vmnet = */ true);
 }
 
-fn cleanup_qemu_files_inner(sock_dir: &Path, keep_dir: bool) {
+fn cleanup_qemu_files_inner(sock_dir: &Path, keep_vmnet: bool) {
     // Zero the shm magic *before* unlinking so any live reader (e.g. the UI's
     // main_stream poll loop) sees magic=0 through its existing mmap and drops
     // its mapping instead of staying stuck on the dead inode after restart.
@@ -411,15 +521,7 @@ fn cleanup_qemu_files_inner(sock_dir: &Path, keep_dir: bool) {
     if let Ok(entries) = std::fs::read_dir(sock_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            // `tapbridge.alive` is the heartbeat the root-side watcher polls;
-            // removing it tells the watcher to destroy the bridge and the TAP.
-            // `TapBridge`'s Drop owns these files.
-            if keep_dir
-                && entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with("tapbridge.")
-            {
+            if keep_vmnet && entry.file_name().to_string_lossy().starts_with("vmnet-") {
                 continue;
             }
             if let Ok(ft) = entry.file_type() {
@@ -431,49 +533,8 @@ fn cleanup_qemu_files_inner(sock_dir: &Path, keep_dir: bool) {
             }
         }
     }
-    if !keep_dir {
+    if !keep_vmnet {
         let _ = std::fs::remove_dir(sock_dir);
-    }
-}
-
-#[cfg(test)]
-mod cleanup_tests {
-    use super::{cleanup_qemu_files, cleanup_qemu_files_for_restart};
-
-    /// The restart path must leave `tapbridge.*` alone - removing the
-    /// heartbeat tells the root watcher to destroy the bridge and TAP that
-    /// QEMU is about to be handed.  Shutdown takes them with everything else.
-    #[test]
-    fn restart_keeps_tapbridge_state_shutdown_does_not() {
-        let dir = std::env::temp_dir().join(format!("cdj3k-tapclean-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let seed = || {
-            std::fs::create_dir_all(&dir).unwrap();
-            for f in [
-                "tapbridge.alive",
-                "tapbridge.sh",
-                "tapbridge.names",
-                "ctrl.sock",
-            ] {
-                std::fs::write(dir.join(f), "").unwrap();
-            }
-        };
-
-        seed();
-        cleanup_qemu_files_for_restart(&dir);
-        assert!(
-            dir.join("tapbridge.alive").exists(),
-            "heartbeat must survive a restart"
-        );
-        assert!(dir.join("tapbridge.sh").exists());
-        assert!(dir.join("tapbridge.names").exists());
-        assert!(!dir.join("ctrl.sock").exists(), "QEMU-owned files still go");
-        assert!(dir.exists(), "restart keeps the dir");
-
-        seed();
-        cleanup_qemu_files(&dir);
-        assert!(!dir.exists(), "shutdown takes the whole dir");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
@@ -481,22 +542,34 @@ mod cleanup_tests {
 mod prune_tests {
     use super::prune_shared_dirs;
 
-    /// The runtime base dir goes only once it is empty - another slot's
-    /// `instance-N` inside it keeps the whole tree.
+    /// With another live lease the socket, its lease dir and both trees stay;
+    /// as the last one out everything goes.
     #[test]
-    fn prune_shared_dirs_removes_the_base_only_when_empty() {
+    fn prune_shared_dirs_removes_trees_only_when_last() {
         let root = std::env::temp_dir().join(format!("cdj3k-prune-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let base = root.join("cdj3k-emu");
-        let other_slot = base.join("instance-7");
-        std::fs::create_dir_all(&other_slot).unwrap();
+        let net = root.join("djpl");
+        let sock = net.join("vmnet-host.sock");
+        let leases = net.join("vmnet-host.sock.clients");
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::create_dir_all(&leases).unwrap();
+        std::fs::write(&sock, "").unwrap();
+        let own = leases.join(std::process::id().to_string());
+        std::fs::write(&own, "").unwrap();
+        let other = leases.join("1"); // launchd: alive, owned by root
+        std::fs::write(&other, "").unwrap();
 
-        prune_shared_dirs(&base);
-        assert!(base.exists(), "another slot's dir keeps the base");
+        prune_shared_dirs(&base, &net, std::process::id());
+        assert!(!own.exists(), "own lease released");
+        assert!(sock.exists() && leases.exists() && net.exists(), "another live lease keeps the daemon");
+        assert!(!base.exists(), "empty runtime base dir goes regardless");
 
-        std::fs::remove_dir(&other_slot).unwrap();
-        prune_shared_dirs(&base);
-        assert!(!base.exists(), "last one out takes the base dir");
+        std::fs::remove_file(&other).unwrap();
+        std::fs::create_dir_all(&base).unwrap();
+        prune_shared_dirs(&base, &net, std::process::id());
+        assert!(!sock.exists() && !leases.exists() && !net.exists(), "last one out takes the DJPL tree");
+        assert!(!base.exists());
         let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -110,11 +110,6 @@ fi
 
 # --------------------------------------------------------------------------
 # 3. Configure
-#
-# --disable-pvg: ParavirtualizedGraphics.framework (3D passthrough to the host
-# via hw/display/apple-gfx.m).  The guest drives virtio-gpu into the shm
-# display and never instantiates it, and the framework's PGTask_t is obsoleted
-# in the macOS 27 SDK, which fails the build under the option's `auto` default.
 # --------------------------------------------------------------------------
 
 mkdir -p "${BUILD_DIR}"
@@ -135,7 +130,6 @@ if [ ! -f "${BUILD_DIR}/build.ninja" ]; then
             --disable-curses            \
             --disable-vnc               \
             --disable-fuse              \
-            --disable-pvg               \
             --disable-docs              \
             --disable-guest-agent       \
             --disable-plugins           \

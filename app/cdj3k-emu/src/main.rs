@@ -168,7 +168,7 @@ fn main() {
     //                         three files exist (wizard provisions them first)
     #[cfg(target_os = "macos")]
     {
-        use cdj3k_emu_runtime::{QemuConfig, QemuInstance, TapBridge, VmnetMode};
+        use cdj3k_emu_runtime::{QemuConfig, QemuInstance, SocketVmnet, TapBridge};
 
         let instance_dir = cdj3k_emu_storage::emmc::default_path(instance)
             .parent()
@@ -238,13 +238,14 @@ fn main() {
         config.serial_log = serial_log;
 
         // ── Pre-build network backend ────────────────────────────────────────
-        // If a saved network interface is available, select the vmnet mode or
-        // set up the TAP bridge before the very first QEMU spawn so the initial
+        // If a saved network interface is available, set up the TAP bridge or
+        // socket_vmnet daemon before the very first QEMU spawn so the initial
         // process already has the right -netdev and we don't have to restart
         // immediately.  prev_net_idx in the worker is seeded from this value
         // so the first poll iteration is a no-op for network setup.
         let mut prebuilt_net = runtime_worker::PrebuiltNet {
             tap_bridge: None,
+            vmnet: None,
             initial_net_idx: cdj3k_emu_platform::menu_state::NET_SEL_NONE,
         };
         let (initial_net_idx, iface_name) = {
@@ -258,9 +259,22 @@ fn main() {
             (idx, name)
         };
         if initial_net_idx == cdj3k_emu_platform::menu_state::NET_SEL_VMNET_HOST {
-            eprintln!("cdj3k-emu: vmnet host-only selected");
-            config.net_vmnet = Some(VmnetMode::Host);
-            prebuilt_net.initial_net_idx = initial_net_idx;
+            match SocketVmnet::start_host() {
+                Ok(sv) => {
+                    eprintln!(
+                        "cdj3k-emu: vmnet host-only up  socket={}",
+                        sv.socket_path().display()
+                    );
+                    config.net_socket_vmnet = Some(sv.socket_path().to_path_buf());
+                    prebuilt_net.vmnet = Some(sv);
+                    prebuilt_net.initial_net_idx = initial_net_idx;
+                }
+                Err(e) => {
+                    eprintln!("cdj3k-emu: initial vmnet host-only start failed: {e}");
+                    cdj3k_emu_platform::menu_state::lock().selected_interface =
+                        cdj3k_emu_platform::menu_state::NET_SEL_NONE;
+                }
+            }
         }
         if let Some(name) = iface_name {
             if name.starts_with("tap") {
@@ -277,14 +291,24 @@ fn main() {
                             cdj3k_emu_platform::menu_state::NET_SEL_NONE;
                     }
                 }
-            } else if let Some(mode) = VmnetMode::bridged(&name) {
-                eprintln!("cdj3k-emu: vmnet bridged on {name}");
-                config.net_vmnet = Some(mode);
-                prebuilt_net.initial_net_idx = initial_net_idx;
             } else {
-                eprintln!("cdj3k-emu: invalid saved interface name: {name:?}");
-                cdj3k_emu_platform::menu_state::lock().selected_interface =
-                    cdj3k_emu_platform::menu_state::NET_SEL_NONE;
+                match SocketVmnet::start_bridged(&name) {
+                    Ok(sv) => {
+                        eprintln!(
+                            "cdj3k-emu: vmnet up on {}  socket={}",
+                            name,
+                            sv.socket_path().display()
+                        );
+                        config.net_socket_vmnet = Some(sv.socket_path().to_path_buf());
+                        prebuilt_net.vmnet = Some(sv);
+                        prebuilt_net.initial_net_idx = initial_net_idx;
+                    }
+                    Err(e) => {
+                        eprintln!("cdj3k-emu: initial vmnet start failed: {e}");
+                        cdj3k_emu_platform::menu_state::lock().selected_interface =
+                            cdj3k_emu_platform::menu_state::NET_SEL_NONE;
+                    }
+                }
             }
         }
 
@@ -305,6 +329,64 @@ fn main() {
             }
         } else {
             eprintln!("cdj3k-emu: firmware not provisioned - opening Install Firmware wizard");
+            cdj3k_emu_platform::menu_state::lock().firmware_wizard_requested = true;
+            runtime_worker::spawn(None, config, prebuilt_net);
+        }
+    }
+
+
+    #[cfg(windows)]
+    {
+        use cdj3k_emu_runtime::{QemuConfig, QemuInstance};
+
+        let instance_dir = cdj3k_emu_storage::emmc::default_path(instance)
+            .parent().unwrap().to_path_buf();
+        let resolved_kernel = kernel.unwrap_or_else(|| instance_dir.join("Image"));
+        let resolved_initramfs = initramfs.unwrap_or_else(|| instance_dir.join("initramfs-patched.cpio.gz"));
+        let emmc_path = cdj3k_emu_storage::emmc::default_path(instance);
+        let emmc_img = if no_emmc { None } else { Some(emmc_path.clone()) };
+        let inst_settings = cdj3k_emu_storage::InstanceSettings::load_or_init(instance);
+        {
+            let mut st = cdj3k_emu_platform::menu_state::lock();
+            st.audio_enabled = inst_settings.audio_enabled;
+            st.audio_device_uid = None; // Windows DSOUND follows the selected/default Windows output for alpha-1.
+            st.alc_enabled = inst_settings.alc_enabled;
+            st.haptic_enabled = false;
+            st.mods_enabled = inst_settings.mods_enabled && !no_mods;
+            st.selected_interface = cdj3k_emu_platform::menu_state::NET_SEL_NONE;
+        }
+        if let Some(path) = &inst_settings.usb_virtual_path {
+            if path.exists() { cdj3k_emu_platform::menu_state::lock().usb_virtual_img = Some(path.clone()); }
+        }
+
+        let mut config = QemuConfig::new(resolved_kernel.clone(), resolved_initramfs.clone());
+        config.instance_id = instance;
+        config.hvf = false; // x64 Windows uses TCG; ARM64/WHPX comes later.
+        config.ssh_port = 2222 + instance as u16;
+        config.qmp_port = 4445 + instance as u16;
+        config.gdb_port = 1235 + instance as u16;
+        config.emmc_img = emmc_img;
+        config.audio = inst_settings.audio_enabled;
+        config.mods_enabled = inst_settings.mods_enabled && !no_mods;
+        config.mac = Some(inst_settings.mac);
+        config.serial_log = serial_log;
+
+        let prebuilt_net = runtime_worker::PrebuiltNet {
+            tap_bridge: None,
+            vmnet: None,
+            initial_net_idx: cdj3k_emu_platform::menu_state::NET_SEL_NONE,
+        };
+        let can_boot = resolved_kernel.exists() && resolved_initramfs.exists() && (no_emmc || emmc_path.exists());
+        if can_boot {
+            match QemuInstance::spawn(config.clone()) {
+                Ok(inst) => runtime_worker::spawn(Some(inst), config, prebuilt_net),
+                Err(e) => {
+                    eprintln!("cdj3k-emu: Windows QEMU start failed: {e:?}");
+                    runtime_worker::spawn(None, config, prebuilt_net);
+                }
+            }
+        } else {
+            eprintln!("cdj3k-emu: firmware not provisioned; expected {} and {}", resolved_kernel.display(), resolved_initramfs.display());
             cdj3k_emu_platform::menu_state::lock().firmware_wizard_requested = true;
             runtime_worker::spawn(None, config, prebuilt_net);
         }
