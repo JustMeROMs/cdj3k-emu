@@ -278,7 +278,7 @@ impl QemuConfig {
             #[cfg(target_os = "macos")]
             let mut audiodev = String::from("coreaudio,id=audio0,in.voices=0,out.buffer-length=5000");
             #[cfg(windows)]
-            let mut audiodev = String::from("dsound,id=audio0,in.voices=0,out.buffer-length=5000");
+            let audiodev = String::from("dsound,id=audio0,in.voices=0,out.buffer-length=5000");
             #[cfg(not(any(target_os = "macos", windows)))]
             let mut audiodev = String::from("sdl,id=audio0,in.voices=0");
             #[cfg(target_os = "macos")]

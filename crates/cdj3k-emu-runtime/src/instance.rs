@@ -47,10 +47,7 @@ pub fn kill_qemu_child() {
             if unsafe { libc::kill(pid as libc::pid_t, 0) } != 0 { break; }
             std::thread::sleep(SIGTERM_POLL);
         }
-        #[cfg(unix)]
         unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
-        #[cfg(windows)]
-        { let _ = std::process::Command::new("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"]).status(); }
     }
     #[cfg(windows)]
     {
@@ -372,10 +369,17 @@ fn wait_or_kill(running: &Arc<AtomicBool>, pid: u32, timeout: Duration) {
     }
     if running.load(Ordering::Acquire) {
         eprintln!(
-            "cdj3k-emu: QEMU did not exit within {}s - sending SIGKILL",
+            "cdj3k-emu: QEMU did not exit within {}s - forcing termination",
             timeout.as_secs()
         );
+        #[cfg(unix)]
         unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+        #[cfg(windows)]
+        {
+            let _ = std::process::Command::new("taskkill")
+                .args(["/PID", &pid.to_string(), "/T", "/F"])
+                .status();
+        }
     }
 }
 

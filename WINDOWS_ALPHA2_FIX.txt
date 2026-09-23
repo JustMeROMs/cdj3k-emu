@@ -1,0 +1,6 @@
+Alpha 2 fix
+
+- Fixed Windows compile failure in wait_or_kill(): libc::kill/pid_t/SIGKILL are Unix-only.
+- Windows now uses taskkill /PID <pid> /T /F for forced termination.
+- Removed redundant unreachable Windows block inside Unix cfg.
+- Removed unused mut warning in Windows audio config.
