@@ -1,0 +1,19 @@
+Windows Alpha 4.1
+=================
+
+Fixes the GitHub Actions packaging failure from Alpha 4.
+
+Root cause:
+setup-msys2@v2 installs a fresh MSYS2 tree in a runner-specific location such as
+D:\a\_temp\msys64. Alpha 4 incorrectly verified and copied C:\msys64, which is
+the separate preinstalled runner image and did not contain the newly installed cpio.
+
+Alpha 4.1 changes:
+- Gives setup-msys2 an id and reads its msys2-location output.
+- Uses the action-provided `msys2` shell to verify bash/cpio/find.
+- Uses MSYS mode because the required tools are MSYS userland utilities.
+- Updates the package database before installing the provisioning tool set.
+- Bundles usr/bin from the actual MSYS2 tree used by the action.
+- Verifies the staged artifact contains all required tools before upload.
+
+No Pioneer firmware or keys are included.

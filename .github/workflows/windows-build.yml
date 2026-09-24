@@ -59,9 +59,11 @@ jobs:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
       - name: Install Windows firmware provisioning tools
+        id: msys2
         uses: msys2/setup-msys2@v2
         with:
-          update: false
+          msystem: MSYS
+          update: true
           install: >-
             bash
             coreutils
@@ -74,11 +76,15 @@ jobs:
             tar
             util-linux
       - name: Verify bundled provisioning tools
-        shell: pwsh
+        shell: msys2 {0}
         run: |
-          & C:/msys64/usr/bin/bash.exe --version
-          & C:/msys64/usr/bin/cpio.exe --version
-          & C:/msys64/usr/bin/find.exe --version
+          set -eux
+          bash --version | head -n 1
+          cpio --version | head -n 1
+          find --version | head -n 1
+          command -v bash
+          command -v cpio
+          command -v find
       - name: Cargo check workspace
         run: cargo check --workspace
       - name: Build Windows app
@@ -98,11 +104,18 @@ jobs:
           # Alpha 4: bundle the MSYS2 userland required only by the firmware
           # provisioning stage. Keeping usr/bin together also carries the DLLs
           # that bash/cpio/find/coreutils depend on.
+          $msysRoot = '${{ steps.msys2.outputs.msys2-location }}'
+          if (-not $msysRoot) { throw "setup-msys2 did not report an installation path" }
+          Write-Host "Bundling MSYS2 from $msysRoot"
           New-Item -ItemType Directory -Force dist/resources/msys2/usr | Out-Null
-          Copy-Item -Recurse C:/msys64/usr/bin dist/resources/msys2/usr/bin
-          if (Test-Path C:/msys64/usr/share/terminfo) {
+          Copy-Item -Recurse "$msysRoot/usr/bin" dist/resources/msys2/usr/bin
+          if (Test-Path "$msysRoot/usr/share/terminfo") {
             New-Item -ItemType Directory -Force dist/resources/msys2/usr/share | Out-Null
-            Copy-Item -Recurse C:/msys64/usr/share/terminfo dist/resources/msys2/usr/share/terminfo
+            Copy-Item -Recurse "$msysRoot/usr/share/terminfo" dist/resources/msys2/usr/share/terminfo
+          }
+          @('bash.exe','cpio.exe','find.exe','chmod.exe','sed.exe','grep.exe','gzip.exe') | ForEach-Object {
+            $tool = Join-Path 'dist/resources/msys2/usr/bin' $_
+            if (-not (Test-Path $tool)) { throw "Bundled provisioning tool missing: $tool" }
           }
           Write-Host "Staged Windows package:"
           Get-ChildItem -Recurse dist | Select-Object FullName,Length
