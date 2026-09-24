@@ -1,0 +1,18 @@
+Windows Alpha 4 - firmware provisioning toolchain
+
+Changes from Alpha 3:
+- Bundles an MSYS2 userland inside resources/msys2/usr/bin.
+- Firmware initramfs extraction/repacking uses the bundled cpio/find tools on Windows.
+- patch-rootfs.sh uses the bundled bash and core utilities on Windows.
+- No WSL, Cygwin, system bash, cpio, or find installation is required.
+- Adds .gitattributes to keep shell scripts LF-only.
+
+Expected Alpha 4 test:
+1. Launch cdj3k-emu.exe.
+2. Open Install Firmware.
+3. Select your own CDJ-3000 .UPD and AES key locally.
+4. Click Install.
+5. The wizard should decrypt, extract, patch initramfs and provision the eMMC image.
+6. QEMU boot is NOT the Alpha 4 goal yet; that is the next milestone.
+
+Do not commit or upload firmware/key files to GitHub.

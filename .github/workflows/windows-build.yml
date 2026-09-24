@@ -22,6 +22,8 @@ jobs:
           docker buildx build \
             --platform linux/arm64 \
             --provenance=false \
+            --cache-from type=gha \
+            --cache-to type=gha,mode=max \
             --target artifacts \
             --output type=local,dest=guest-assets-out \
             -f docker/Dockerfile .
@@ -56,6 +58,27 @@ jobs:
         with:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
+      - name: Install Windows firmware provisioning tools
+        uses: msys2/setup-msys2@v2
+        with:
+          update: false
+          install: >-
+            bash
+            coreutils
+            findutils
+            cpio
+            sed
+            grep
+            gawk
+            gzip
+            tar
+            util-linux
+      - name: Verify bundled provisioning tools
+        shell: pwsh
+        run: |
+          & C:/msys64/usr/bin/bash.exe --version
+          & C:/msys64/usr/bin/cpio.exe --version
+          & C:/msys64/usr/bin/find.exe --version
       - name: Cargo check workspace
         run: cargo check --workspace
       - name: Build Windows app
@@ -72,6 +95,15 @@ jobs:
           Copy-Item windows/README-WINDOWS.md dist/
           Copy-Item WINDOWS_PORT_STATUS.md dist/
           Copy-Item -Recurse guest-resources dist/resources
+          # Alpha 4: bundle the MSYS2 userland required only by the firmware
+          # provisioning stage. Keeping usr/bin together also carries the DLLs
+          # that bash/cpio/find/coreutils depend on.
+          New-Item -ItemType Directory -Force dist/resources/msys2/usr | Out-Null
+          Copy-Item -Recurse C:/msys64/usr/bin dist/resources/msys2/usr/bin
+          if (Test-Path C:/msys64/usr/share/terminfo) {
+            New-Item -ItemType Directory -Force dist/resources/msys2/usr/share | Out-Null
+            Copy-Item -Recurse C:/msys64/usr/share/terminfo dist/resources/msys2/usr/share/terminfo
+          }
           Write-Host "Staged Windows package:"
           Get-ChildItem -Recurse dist | Select-Object FullName,Length
       - uses: actions/upload-artifact@v4

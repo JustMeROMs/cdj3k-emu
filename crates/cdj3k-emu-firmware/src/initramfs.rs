@@ -14,6 +14,9 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[cfg(windows)]
+use std::ffi::OsString;
+
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
@@ -178,7 +181,7 @@ pub fn patch_initramfs(
     std::fs::create_dir_all(&rootfs)?;
 
     // 1. Unpack the original initramfs into rootfs/.
-    unpack_cpio_gz(initramfs_gz, &rootfs)?;
+    unpack_cpio_gz(initramfs_gz, &rootfs, resources_dir)?;
 
     // 2. Inject pre-built .ko files into rootfs/lib/modules/.
     let ko_dst = rootfs.join("lib/modules");
@@ -207,23 +210,28 @@ pub fn patch_initramfs(
                 bin_dst.join(&name)
             };
             std::fs::copy(&src, &dst)?;
-            set_executable(&dst)?;
+            set_executable(&dst, resources_dir)?;
         }
     }
 
     // 4. Run patch-rootfs.sh from the bundled patch directory.
+    //
+    // Windows Alpha 4 ships a small MSYS2 userland under resources/msys2/usr/bin
+    // so firmware provisioning does not depend on WSL or a system-wide Unix
+    // toolchain. macOS/Linux keep using the host tools as before.
     let patch_script = patch_dir.join("patch-rootfs.sh");
     if !patch_script.exists() {
         return Err(PatchError::MissingResource(
             patch_script.display().to_string(),
         ));
     }
-    let status = Command::new("bash")
-        .arg(&patch_script)
+    let mut bash = tool_command(resources_dir, "bash")?;
+    bash.arg(&patch_script)
         .arg(&rootfs)
         .env("ROOTFS", &rootfs)
-        .env("PATCH_ASSETS_DIR", &patch_dir)
-        .status()?;
+        .env("PATCH_ASSETS_DIR", &patch_dir);
+    configure_tool_path(&mut bash, resources_dir);
+    let status = bash.status()?;
     if !status.success() {
         return Err(PatchError::CommandFailed(format!(
             "patch-rootfs.sh exited with {status}"
@@ -232,7 +240,7 @@ pub fn patch_initramfs(
 
     // 5. Repack rootfs → raw cpio.
     let raw_cpio = tmp.join("initramfs-patched.cpio");
-    repack_cpio(&rootfs, &raw_cpio)?;
+    repack_cpio(&rootfs, &raw_cpio, resources_dir)?;
 
     // 6. Fix uid/gid in the raw cpio (macOS bsdcpio records host UID).
     let mut cpio_bytes = std::fs::read(&raw_cpio)?;
@@ -255,7 +263,7 @@ pub fn patch_initramfs(
 
 // ── cpio helpers ──────────────────────────────────────────────────────────────
 
-fn unpack_cpio_gz(gz_path: &Path, rootfs: &Path) -> Result<(), PatchError> {
+fn unpack_cpio_gz(gz_path: &Path, rootfs: &Path, resources_dir: &Path) -> Result<(), PatchError> {
     let raw = std::fs::read(gz_path)?;
     // Accept raw CPIO (starts with "070701") or gzip-compressed CPIO.
     let cpio_data = if raw.starts_with(b"070701") || raw.starts_with(b"070702") {
@@ -267,7 +275,9 @@ fn unpack_cpio_gz(gz_path: &Path, rootfs: &Path) -> Result<(), PatchError> {
         out
     };
 
-    let mut child = Command::new("cpio")
+    let mut cpio = tool_command(resources_dir, "cpio")?;
+    configure_tool_path(&mut cpio, resources_dir);
+    let mut child = cpio
         .args(["-id", "--quiet"])
         .current_dir(rootfs)
         .stdin(std::process::Stdio::piped())
@@ -286,9 +296,11 @@ fn unpack_cpio_gz(gz_path: &Path, rootfs: &Path) -> Result<(), PatchError> {
     Ok(())
 }
 
-fn repack_cpio(rootfs: &Path, out: &Path) -> Result<(), PatchError> {
+fn repack_cpio(rootfs: &Path, out: &Path, resources_dir: &Path) -> Result<(), PatchError> {
     // find . | sort | cpio -H newc -o  inside rootfs, output to out.
-    let find = Command::new("find").arg(".").current_dir(rootfs).output()?;
+    let mut find_cmd = tool_command(resources_dir, "find")?;
+    configure_tool_path(&mut find_cmd, resources_dir);
+    let find = find_cmd.arg(".").current_dir(rootfs).output()?;
     if !find.status.success() {
         return Err(PatchError::CommandFailed("find failed".into()));
     }
@@ -302,7 +314,9 @@ fn repack_cpio(rootfs: &Path, out: &Path) -> Result<(), PatchError> {
     let sorted = paths.join("\n");
 
     let out_file = std::fs::File::create(out)?;
-    let mut child = Command::new("cpio")
+    let mut cpio = tool_command(resources_dir, "cpio")?;
+    configure_tool_path(&mut cpio, resources_dir);
+    let mut child = cpio
         .args(["-H", "newc", "-o", "--quiet"])
         .current_dir(rootfs)
         .stdin(std::process::Stdio::piped())
@@ -375,14 +389,58 @@ fn tmp_dir(prefix: &str) -> io::Result<PathBuf> {
 }
 
 #[cfg(unix)]
-fn set_executable(path: &Path) -> io::Result<()> {
+fn set_executable(path: &Path, _resources_dir: &Path) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let mut perms = std::fs::metadata(path)?.permissions();
     perms.set_mode(perms.mode() | 0o111);
     std::fs::set_permissions(path, perms)
 }
 
-#[cfg(not(unix))]
-fn set_executable(_path: &Path) -> io::Result<()> {
+#[cfg(windows)]
+fn set_executable(path: &Path, resources_dir: &Path) -> io::Result<()> {
+    // NTFS has no POSIX executable bit. MSYS2's chmod records enough mode
+    // information for its cpio to emit executable guest files correctly.
+    if let Ok(mut chmod) = tool_command(resources_dir, "chmod") {
+        configure_tool_path(&mut chmod, resources_dir);
+        let _ = chmod.arg("+x").arg(path).status();
+    }
     Ok(())
 }
+
+#[cfg(windows)]
+fn msys_bin(resources_dir: &Path) -> PathBuf {
+    resources_dir.join("msys2").join("usr").join("bin")
+}
+
+#[cfg(windows)]
+fn tool_command(resources_dir: &Path, tool: &str) -> Result<Command, PatchError> {
+    let bin = msys_bin(resources_dir);
+    let exe = bin.join(format!("{tool}.exe"));
+    if !exe.exists() {
+        return Err(PatchError::MissingResource(format!(
+            "{} (Windows provisioning tools are missing; re-download the Alpha 4 Windows artifact)",
+            exe.display()
+        )));
+    }
+    Ok(Command::new(exe))
+}
+
+#[cfg(not(windows))]
+fn tool_command(_resources_dir: &Path, tool: &str) -> Result<Command, PatchError> {
+    Ok(Command::new(tool))
+}
+
+#[cfg(windows)]
+fn configure_tool_path(cmd: &mut Command, resources_dir: &Path) {
+    let bin = msys_bin(resources_dir);
+    let mut path = OsString::new();
+    path.push(bin.as_os_str());
+    path.push(";");
+    if let Some(existing) = std::env::var_os("PATH") {
+        path.push(existing);
+    }
+    cmd.env("PATH", path);
+}
+
+#[cfg(not(windows))]
+fn configure_tool_path(_cmd: &mut Command, _resources_dir: &Path) {}
