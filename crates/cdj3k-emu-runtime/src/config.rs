@@ -360,9 +360,15 @@ impl QemuConfig {
             args.extend(["-device".into(), dev]);
         }
 
-        // ivshmem-plain (jog LCD zero-copy frame buffer). The guest's
-        // ep122_shim.so writes extracted 320×240 XRGB pixels directly into
-        // BAR2; the host mmaps `jog.shm` and polls the seqlock counter.
+        // ivshmem-plain (jog LCD zero-copy frame buffer).
+        //
+        // The upstream CDJ3K patch enables QEMU ivshmem on macOS by exposing
+        // POSIX fd/event-notifier APIs. Those APIs are not available in the
+        // Windows QEMU build. Alpha 5.6 therefore leaves the jog-LCD ivshmem
+        // device disabled on Windows so the core ARM64 QEMU backend can build
+        // and boot. Main LCD uses the separate Windows-capable shm display
+        // backend. Native Windows jog sharing is the next integration step.
+        #[cfg(not(windows))]
         args.extend([
             "-object".into(),
             format!(

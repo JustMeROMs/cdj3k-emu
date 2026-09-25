@@ -1,0 +1,25 @@
+CDJ3K-EMU Windows Alpha 5.6
+
+Observed Windows QEMU compile failure:
+- hw/misc/ivshmem-pci.c referenced POSIX-only APIs:
+  memory_region_init_ram_from_fd()
+  event_notifier_init_fd()
+  munmap()
+
+Cause:
+- patches 01-03 intentionally force ivshmem support for macOS by exposing
+  POSIX fd/event-notifier behavior.
+- Windows QEMU has a different host API and cannot compile that POSIX path.
+
+Alpha 5.6:
+- skips patches 01-03 only for the Windows QEMU build.
+- keeps the custom main-LCD shm display patches 04-06, which already contain
+  native Win32 file-mapping support.
+- disables the jog-LCD ivshmem device in the Windows Rust QEMU command line.
+- preserves ivshmem unchanged for macOS/Linux.
+
+Expected milestone:
+- patched qemu-system-aarch64.exe and qemu-img.exe compile on Windows.
+- main LCD path remains available.
+- jog LCD is temporarily disabled on Windows until a native Win32 shared-memory
+  transport is implemented.

@@ -52,6 +52,10 @@ git -C "${SRC_DIR}" clean -fdx -q
 for p in "${PATCHES_DIR}"/*.patch; do
   base="$(basename "$p")"
   case "$base" in
+    01-ivshmem-meson.patch|02-ivshmem-event-notifier.patch|03-ivshmem-kconfig.patch)
+      echo "==> Alpha 5.6: skipping POSIX ivshmem patch ${base} on Windows"
+      continue
+      ;;
     07-coreaudio-bypass.patch|08-virtio-snd-bypass.patch|09-system-main-qos.patch|12-hvf-vcpu-qos.patch)
       echo "==> Skipping macOS-only patch ${base}"
       continue
