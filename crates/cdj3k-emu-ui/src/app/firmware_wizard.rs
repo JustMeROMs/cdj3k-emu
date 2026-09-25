@@ -396,7 +396,99 @@ impl FirmwareWizard {
         }
     }
 
+    fn windows_preflight(&self) -> Result<Vec<String>, String> {
+        let mut ok = Vec::new();
+
+        let upd = std::path::Path::new(&self.upd_path);
+        if !upd.is_file() {
+            return Err(format!("Firmware file not found: {}", upd.display()));
+        }
+        ok.push(format!("Firmware found: {}", upd.display()));
+
+        if upd
+            .extension()
+            .and_then(|x| x.to_str())
+            .map(|x| !x.eq_ignore_ascii_case("upd"))
+            .unwrap_or(true)
+        {
+            return Err("Firmware file must be a .UPD file".to_string());
+        }
+
+        let key = std::path::Path::new(&self.key_path);
+        if !key.is_file() {
+            return Err(format!("Decryption key file not found: {}", key.display()));
+        }
+        ok.push(format!("Key file found: {}", key.display()));
+
+        let resources = bundled_resources();
+        let kernel = resources.join("Image");
+        if !kernel.is_file() {
+            return Err(format!(
+                "Bundled guest kernel missing: {}",
+                kernel.display()
+            ));
+        }
+        ok.push(format!("Guest kernel OK: {}", kernel.display()));
+
+        #[cfg(windows)]
+        {
+            let bin = resources.join("msys2").join("usr").join("bin");
+            for tool in ["bash.exe", "cpio.exe", "find.exe", "chmod.exe", "sed.exe", "grep.exe", "gzip.exe"] {
+                let p = bin.join(tool);
+                if !p.is_file() {
+                    return Err(format!("Bundled provisioning tool missing: {}", p.display()));
+                }
+            }
+            ok.push(format!(
+                "Provisioning tools OK: {}",
+                bin.display()
+            ));
+
+            let qemu_img = std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|d| d.join("qemu-img.exe")));
+            match qemu_img {
+                Some(p) if p.is_file() => ok.push(format!("qemu-img OK: {}", p.display())),
+                Some(p) => {
+                    return Err(format!(
+                        "qemu-img.exe missing from Windows package: {}",
+                        p.display()
+                    ))
+                }
+                None => return Err("Could not resolve Windows application folder".to_string()),
+            }
+        }
+
+        Ok(ok)
+    }
+
     fn start_provision(&mut self, ctx: Context) {
+        #[cfg(windows)]
+        {
+            match self.windows_preflight() {
+                Ok(lines) => {
+                    let mut log = self.log.lock().unwrap();
+                    log.clear();
+                    log.push_str("[preflight] Windows firmware installer checks\n");
+                    for line in lines {
+                        log.push_str("[OK] ");
+                        log.push_str(&line);
+                        log.push('\n');
+                    }
+                    log.push_str("[preflight] Ready to provision firmware\n");
+                }
+                Err(e) => {
+                    *self.log.lock().unwrap() = format!(
+                        "[preflight] FAILED\n[error] {e}\n"
+                    );
+                    self.terminal = Some(ProvisionStep::Error(format!(
+                        "Preflight failed: {e}"
+                    )));
+                    return;
+                }
+            }
+        }
+
         let key = match cdj3k_emu_firmware::LuksKey::from_file(std::path::Path::new(&self.key_path))
         {
             Ok(k) => k,
@@ -414,7 +506,9 @@ impl FirmwareWizard {
         let status = Arc::new(Mutex::new(ProvisionStep::Decrypting));
         self.provision_status = Some(status.clone());
 
-        // Clear + recycle the same log Arc.
+        // Recycle the same log Arc. On Windows, keep the preflight results
+        // visible above the provisioning steps.
+        #[cfg(not(windows))]
         self.log.lock().unwrap().clear();
         let log = self.log.clone();
 

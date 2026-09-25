@@ -1,0 +1,20 @@
+CDJ3K-EMU Windows Alpha 6.2 - Firmware installer preflight
+
+Adds noob-friendly checks before the Install action starts any destructive or
+long-running work.
+
+Windows preflight now verifies:
+- selected firmware file exists
+- firmware filename is .UPD
+- selected decryption key file exists
+- bundled guest kernel Image exists
+- bundled MSYS2 provisioning tools exist:
+  bash.exe, cpio.exe, find.exe, chmod.exe, sed.exe, grep.exe, gzip.exe
+- qemu-img.exe exists beside cdj3k-emu.exe
+
+Results are written into the Firmware Wizard log as [OK] lines.
+If anything is missing, installation stops immediately and the wizard displays
+a clear Preflight failed message instead of relying on the console.
+
+This patch does NOT include or derive a Pioneer/AlphaTheta decryption key.
+The user must supply a legitimately obtained compatible key file locally.
