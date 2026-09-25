@@ -1,0 +1,15 @@
+CDJ3K Emulator Windows Alpha 5.1
+
+Fixes the Alpha 5 GitHub Actions failure:
+  error: target not found: mingw-w64-x86_64-libslirp
+
+Changes:
+- libslirp removed from the mandatory setup-msys2 package list.
+- workflow tries to install libslirp separately but does not fail if the runner mirror lacks it.
+- qemu/build-windows.sh auto-detects libslirp with pkg-config and enables/disables slirp accordingly.
+- Windows QEMU skips macOS-only CoreAudio, Mach QoS and HVF patch files: 07, 08, 09 and 12.
+
+Expected next result:
+- The MSYS2 setup step should pass.
+- GitHub should reach the actual patched QEMU configure/build step.
+- If that step fails, send the first red configure/compiler error block.

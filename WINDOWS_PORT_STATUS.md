@@ -29,3 +29,9 @@ Still to validate after QEMU builds:
 - Networking / Pro DJ Link.
 
 Never commit Pioneer firmware or keys.
+
+
+## Alpha 5.1
+- Made libslirp optional so an MSYS2 mirror/package-index mismatch cannot abort the Windows QEMU job before compilation.
+- Windows QEMU now skips the CoreAudio/Mach/HVF-only patches (07, 08, 09 and 12).
+- The Windows build continues with TCG and the normal Windows QEMU audio path; Pro DJ Link/networking is a later integration milestone.

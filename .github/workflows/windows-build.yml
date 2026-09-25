@@ -176,10 +176,29 @@ jobs:
             mingw-w64-x86_64-glib2
             mingw-w64-x86_64-pixman
             mingw-w64-x86_64-zlib
-            mingw-w64-x86_64-libslirp
             mingw-w64-x86_64-capstone
             mingw-w64-x86_64-libffi
             mingw-w64-x86_64-gettext
+
+      # libslirp is useful for QEMU user-mode networking, but a transient
+      # MSYS2 mirror/repository mismatch must not block the entire Windows
+      # emulator build. Try to install it separately; build-windows.sh will
+      # enable slirp only when pkg-config can actually find it.
+      - name: Install optional QEMU libslirp networking
+        if: steps.qemu-cache.outputs.cache-hit != 'true'
+        shell: msys2 {0}
+        run: |
+          set +e
+          pacman -Sy --noconfirm
+          pacman -S --needed --noconfirm mingw-w64-x86_64-libslirp
+          rc=$?
+          if [ $rc -eq 0 ]; then
+            echo "libslirp installed; QEMU user-mode networking will be enabled."
+          else
+            echo "WARNING: libslirp package unavailable on this runner/mirror."
+            echo "QEMU will be built without user-mode slirp networking for this alpha."
+          fi
+          exit 0
 
       - name: Build patched QEMU for Windows
         if: steps.qemu-cache.outputs.cache-hit != 'true'
