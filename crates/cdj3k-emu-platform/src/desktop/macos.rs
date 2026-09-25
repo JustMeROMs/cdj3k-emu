@@ -267,7 +267,36 @@ pub fn open_file_picker(title: &str, allowed_types: &[&str]) -> Option<std::path
     path_ns.map(|s| std::path::PathBuf::from(s.to_string()))
 }
 
-#[cfg(not(target_os = "macos"))]
-pub fn open_file_picker(_title: &str, _allowed_types: &[&str]) -> Option<std::path::PathBuf> {
-    None
+#[cfg(target_os = "windows")]
+pub fn open_file_picker(title: &str, allowed_types: &[&str]) -> Option<std::path::PathBuf> {
+    // rfd uses the native Windows IFileOpenDialog implementation, so this
+    // behaves like a normal Explorer file picker and does not require WSL,
+    // MSYS2, or any external helper process.
+    let mut dialog = rfd::FileDialog::new().set_title(title);
+
+    if !allowed_types.is_empty() {
+        // The firmware wizard passes extensions such as "UPD".
+        let exts: Vec<String> = allowed_types
+            .iter()
+            .map(|ext| ext.trim_start_matches('.').to_ascii_lowercase())
+            .collect();
+        let ext_refs: Vec<&str> = exts.iter().map(String::as_str).collect();
+        dialog = dialog.add_filter("Supported files", &ext_refs);
+    }
+
+    dialog.pick_file()
+}
+
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+pub fn open_file_picker(title: &str, allowed_types: &[&str]) -> Option<std::path::PathBuf> {
+    let mut dialog = rfd::FileDialog::new().set_title(title);
+    if !allowed_types.is_empty() {
+        let exts: Vec<String> = allowed_types
+            .iter()
+            .map(|ext| ext.trim_start_matches('.').to_ascii_lowercase())
+            .collect();
+        let ext_refs: Vec<&str> = exts.iter().map(String::as_str).collect();
+        dialog = dialog.add_filter("Supported files", &ext_refs);
+    }
+    dialog.pick_file()
 }

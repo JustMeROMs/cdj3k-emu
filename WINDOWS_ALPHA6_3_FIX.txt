@@ -1,0 +1,22 @@
+CDJ3K-EMU Windows Alpha 6.3 - Native Windows file picker
+
+Observed issue:
+- Browse buttons in the Firmware Wizard did nothing on Windows.
+
+Cause:
+- open_file_picker() only had a real macOS implementation.
+- Every non-macOS build returned None immediately.
+
+Fix:
+- Windows now uses rfd::FileDialog, which opens the native Windows file-open
+  dialog.
+- Firmware Browse filters to .UPD.
+- Key Browse accepts any file.
+- No external helper, WSL, MSYS2, or shell is required.
+
+Expected test:
+1. Open Install Firmware.
+2. Click Browse next to Firmware (.UPD).
+3. Native Windows Explorer-style file picker opens.
+4. Pick CDJ3Kv320/3.20.UPD and the selected path appears in the field.
+5. Browse next to Decryption key also opens normally.
