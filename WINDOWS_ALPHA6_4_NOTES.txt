@@ -1,0 +1,22 @@
+CDJ3K-EMU Windows Alpha 6.4 - Firmware wizard readiness UI
+
+Changes
+-------
+- Firmware row now shows live status:
+    Firmware not selected
+    Firmware file not found
+    Selected file is not a .UPD firmware file
+    Firmware OK
+- Decryption-key row now shows live status:
+    Decryption key not selected
+    Decryption key file not found
+    Key file OK
+- Windows provisioning environment is checked live:
+    guest Image
+    bundled bash/cpio/find/chmod/sed/grep/gzip
+    qemu-img.exe
+- Install is disabled until ALL required checks are green.
+- When everything is valid, the wizard shows:
+    Windows provisioning environment ready
+
+This build does not include, generate, or derive a Pioneer/AlphaTheta key.

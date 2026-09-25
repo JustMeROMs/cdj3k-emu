@@ -230,10 +230,18 @@ impl FirmwareWizard {
             ui.add_space(14.0);
             self.section_label(ui, "Firmware (.UPD)");
             self.path_row(ui, "wizard_upd", true, field_w);
+            let (upd_ok, upd_status) = self.firmware_status();
+            self.validation_line(ui, upd_ok, &upd_status);
 
-            ui.add_space(14.0);
+            ui.add_space(10.0);
             self.section_label(ui, "Decryption key");
             self.path_row(ui, "wizard_key", false, field_w);
+            let (key_ok, key_status) = self.key_status();
+            self.validation_line(ui, key_ok, &key_status);
+
+            ui.add_space(10.0);
+            let (env_ok, env_status) = self.windows_environment_status();
+            self.validation_line(ui, env_ok, &env_status);
         }
 
         ui.add_space(14.0);
@@ -300,7 +308,10 @@ impl FirmwareWizard {
                 }
 
                 _ => {
-                    let can_install = !self.upd_path.is_empty() && !self.key_path.is_empty();
+                    let can_install =
+                        self.firmware_status().0
+                        && self.key_status().0
+                        && self.windows_environment_status().0;
                     ui.add_enabled_ui(can_install, |ui| {
                         let install = Button::new(
                             RichText::new("Install")
@@ -393,6 +404,100 @@ impl FirmwareWizard {
             } else {
                 self.key_path = val;
             }
+        }
+    }
+
+    fn validation_line(&self, ui: &mut egui::Ui, ok: bool, text: &str) {
+        let (symbol, color) = if ok {
+            ("✓", Color32::from_rgb(95, 210, 135))
+        } else {
+            ("●", Color32::from_rgb(220, 105, 105))
+        };
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(symbol).size(12.0).strong().color(color));
+            ui.label(
+                RichText::new(text)
+                    .size(10.5)
+                    .color(if ok {
+                        Color32::from_rgb(145, 205, 160)
+                    } else {
+                        Color32::from_rgb(205, 145, 145)
+                    }),
+            );
+        });
+    }
+
+    fn firmware_status(&self) -> (bool, String) {
+        if self.upd_path.trim().is_empty() {
+            return (false, "Firmware not selected".to_string());
+        }
+        let p = std::path::Path::new(&self.upd_path);
+        if !p.is_file() {
+            return (false, "Firmware file not found".to_string());
+        }
+        let ext_ok = p
+            .extension()
+            .and_then(|x| x.to_str())
+            .map(|x| x.eq_ignore_ascii_case("upd"))
+            .unwrap_or(false);
+        if !ext_ok {
+            return (false, "Selected file is not a .UPD firmware file".to_string());
+        }
+        (true, "Firmware OK".to_string())
+    }
+
+    fn key_status(&self) -> (bool, String) {
+        if self.key_path.trim().is_empty() {
+            return (false, "Decryption key not selected".to_string());
+        }
+        let p = std::path::Path::new(&self.key_path);
+        if !p.is_file() {
+            return (false, "Decryption key file not found".to_string());
+        }
+        (true, "Key file OK".to_string())
+    }
+
+    fn windows_environment_status(&self) -> (bool, String) {
+        #[cfg(windows)]
+        {
+            let resources = bundled_resources();
+            let kernel = resources.join("Image");
+            if !kernel.is_file() {
+                return (false, format!("Guest kernel missing: {}", kernel.display()));
+            }
+
+            let bin = resources.join("msys2").join("usr").join("bin");
+            for tool in [
+                "bash.exe",
+                "cpio.exe",
+                "find.exe",
+                "chmod.exe",
+                "sed.exe",
+                "grep.exe",
+                "gzip.exe",
+            ] {
+                if !bin.join(tool).is_file() {
+                    return (false, format!("Provisioning tool missing: {tool}"));
+                }
+            }
+
+            let qemu_img = std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|d| d.join("qemu-img.exe")));
+            match qemu_img {
+                Some(p) if p.is_file() => {}
+                Some(p) => {
+                    return (false, format!("qemu-img.exe missing: {}", p.display()));
+                }
+                None => return (false, "Could not resolve application folder".to_string()),
+            }
+
+            return (true, "Windows provisioning environment ready".to_string());
+        }
+
+        #[cfg(not(windows))]
+        {
+            (true, "Provisioning environment ready".to_string())
         }
     }
 
