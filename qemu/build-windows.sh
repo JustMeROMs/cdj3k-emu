@@ -13,7 +13,11 @@ PATCHES_DIR="${QEMU_DIR}/patches"
 QEMU_REF="ee7eb612be8f8886d48c1d0c1f1c65e495138f83"
 QEMU_REPO="https://github.com/qemu/qemu.git"
 
-export MSYS2_ARG_CONV_EXCL='*'
+# Do not globally disable MSYS2 path conversion. QEMU's configure invokes the
+# native MinGW Python with POSIX paths (for example /d/a/...). MSYS2 must
+# translate those arguments to D:/a/...; disabling conversion produces bogus
+# paths such as D:/d:/a/... and breaks python/scripts/mkvenv.py.
+unset MSYS2_ARG_CONV_EXCL || true
 
 rm -rf "${OUT_DIR}"
 mkdir -p "${OUT_DIR}"
@@ -66,6 +70,7 @@ echo "==> Alpha 5.2: building QEMU without libslirp networking"
 
 mkdir -p "${BUILD_DIR}"
 if [ ! -f "${BUILD_DIR}/build.ninja" ]; then
+  echo "==> Alpha 5.4: MSYS2 path conversion enabled for QEMU configure"
   echo "==> Configuring Windows QEMU (aarch64-softmmu, TCG; ${SLIRP_OPT})"
   (
     cd "${BUILD_DIR}"

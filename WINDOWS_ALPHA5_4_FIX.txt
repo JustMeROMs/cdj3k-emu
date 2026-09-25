@@ -1,0 +1,16 @@
+Alpha 5.4 - QEMU Python/MSYS2 path conversion fix
+
+Observed GitHub Actions failure:
+  python3.exe: can't open file 'D:/d:/a/.../qemu/src-win/python/scripts/mkvenv.py'
+  ERROR: python venv creation failed
+
+Cause:
+  build-windows.sh globally set MSYS2_ARG_CONV_EXCL='*'. QEMU's configure
+  launches native MinGW Python with a POSIX /d/a/... pathname. With MSYS2
+  conversion disabled, Windows Python interprets it as D:/d:/a/... .
+
+Fix:
+  Re-enable normal MSYS2 argument/path conversion before QEMU configure.
+  This allows /d/a/... to become the correct D:/a/... path for python3.exe.
+
+No Linux guest changes are required.
