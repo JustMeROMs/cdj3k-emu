@@ -1,0 +1,11 @@
+CDJ3K-EMU Windows Alpha 5.5
+
+Fix:
+- QEMU configure completed successfully, but Ninja rejected the explicit
+  target name 'qemu-system-aarch64' on the MinGW build.
+- Alpha 5.5 builds the default Ninja graph instead of naming that target.
+- It then verifies qemu-system-aarch64.exe and qemu-img.exe exist before
+  packaging them.
+
+This gets us past:
+  ninja: error: unknown target 'qemu-system-aarch64'

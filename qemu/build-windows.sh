@@ -93,7 +93,22 @@ fi
 
 JOBS="${NUMBER_OF_PROCESSORS:-4}"
 echo "==> Building patched QEMU with ${JOBS} jobs"
-ninja -C "${BUILD_DIR}" -j"${JOBS}" qemu-system-aarch64 qemu-img
+# On MinGW/Windows, Meson/Ninja exposes the executable targets with the .exe
+# suffix (and target naming can vary slightly between QEMU/Meson versions).
+# Building the default graph is more robust than naming qemu-system-aarch64
+# explicitly, then we verify the two binaries we actually need exist.
+ninja -C "${BUILD_DIR}" -j"${JOBS}"
+
+test -f "${BUILD_DIR}/qemu-system-aarch64.exe" || {
+  echo "ERROR: qemu-system-aarch64.exe was not produced"
+  echo "Available QEMU-related build outputs:"
+  find "${BUILD_DIR}" -maxdepth 2 -type f \( -iname 'qemu-system-*' -o -iname 'qemu-img*' \) -print || true
+  exit 1
+}
+test -f "${BUILD_DIR}/qemu-img.exe" || {
+  echo "ERROR: qemu-img.exe was not produced"
+  exit 1
+}
 
 cp "${BUILD_DIR}/qemu-system-aarch64.exe" "${OUT_DIR}/"
 cp "${BUILD_DIR}/qemu-img.exe" "${OUT_DIR}/"
