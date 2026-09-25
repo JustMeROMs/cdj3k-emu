@@ -28,6 +28,9 @@ pub use instance::{
     cleanup_qemu_files, cleanup_runtime_files, kill_qemu_child, kill_qemu_child_now, InstanceError,
     QemuInstance, SHUTDOWN_SOCK_DIR,
 };
+
+#[cfg(not(target_os = "macos"))]
+pub use instance::{external_qemu_exe, external_qemu_status};
 pub use qmp::{QmpClient, QmpError};
 pub use shutdown::{register_worker_thread, wait_for_worker, worker_is_finished};
 pub use tapbridge::TapBridge;

@@ -1,0 +1,14 @@
+CDJ3K-EMU Windows Alpha 6.1
+
+Fixes the Alpha 6 Windows frontend compile error:
+
+  unresolved import `cdj3k_emu_runtime::external_qemu_status`
+
+Alpha 6 added the diagnostic helper in instance.rs but did not re-export it
+from cdj3k-emu-runtime's crate root. Alpha 6.1 re-exports both:
+  external_qemu_exe
+  external_qemu_status
+
+for non-macOS builds.
+
+No QEMU or Linux guest changes are included in this patch.
