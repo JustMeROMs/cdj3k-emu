@@ -6,18 +6,96 @@ on:
     branches: [ "windows-port", "main" ]
   pull_request:
 
+permissions:
+  contents: read
+  actions: read
+
 jobs:
   guest-assets:
-    name: Build Linux guest assets
+    name: Prepare Linux guest assets
     runs-on: ubuntu-latest
+    outputs:
+      source_key: ${{ steps.guest-key.outputs.key }}
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
-      - name: Build ARM64 guest assets
+
+      - name: Compute guest source key
+        id: guest-key
+        shell: bash
+        run: echo "key=$(python3 scripts/guest-source-key.py)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore guest resource cache
+        id: guest-cache
+        uses: actions/cache@v4
+        with:
+          path: guest-resources
+          key: guest-resources-v2-${{ steps.guest-key.outputs.key }}
+
+      # Alpha 5 bootstrap: the Alpha 4.1 run already produced known-good guest
+      # resources from exactly this guest source tree. Reuse that artifact once
+      # to seed the new content-keyed cache instead of rebuilding Linux for 4h.
+      - name: Bootstrap guest resources from previous successful artifact
+        id: bootstrap
+        if: steps.guest-cache.outputs.cache-hit != 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTUAL_KEY: ${{ steps.guest-key.outputs.key }}
         run: |
+          set -euo pipefail
+          APPROVED_KEY="$(cat windows/guest-resources-bootstrap-key.txt)"
+          if [ "$ACTUAL_KEY" != "$APPROVED_KEY" ]; then
+            echo "Guest source changed; refusing stale artifact bootstrap."
+            echo "bootstrapped=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Guest source matches Alpha 4.1; looking for previous artifact..."
+          api="https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts?name=cdj3k-emu-guest-resources&per_page=100"
+          curl -fsSL \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "$api" > artifacts.json
+          artifact_id="$(jq -r --arg current "$GITHUB_RUN_ID" '
+            [.artifacts[] | select(.expired == false) | select((.workflow_run.id|tostring) != $current)]
+            | sort_by(.created_at) | reverse | .[0].id // empty
+          ' artifacts.json)"
+          if [ -z "$artifact_id" ]; then
+            echo "No reusable guest artifact found; a full guest build is required."
+            echo "bootstrapped=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          curl -fL \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" \
+            -o guest.zip
+          rm -rf guest-resources
+          mkdir -p guest-resources
+          unzip -q guest.zip -d guest-resources
+          if [ -f guest-resources/guest-resources/Image ] && [ ! -f guest-resources/Image ]; then
+            cp -a guest-resources/guest-resources/. guest-resources/
+            rm -rf guest-resources/guest-resources
+          fi
+          test -f guest-resources/Image
+          test -f guest-resources/tools/ep122_shim.so
+          test -f guest-resources/patch/patch-rootfs.sh
+          echo "Reused artifact ${artifact_id}; guest cache will be seeded at job completion."
+          echo "bootstrapped=true" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-qemu-action@v3
+        if: steps.guest-cache.outputs.cache-hit != 'true' && steps.bootstrap.outputs.bootstrapped != 'true'
+      - uses: docker/setup-buildx-action@v3
+        if: steps.guest-cache.outputs.cache-hit != 'true' && steps.bootstrap.outputs.bootstrapped != 'true'
+
+      - name: Build ARM64 guest assets
+        if: steps.guest-cache.outputs.cache-hit != 'true' && steps.bootstrap.outputs.bootstrapped != 'true'
+        shell: bash
+        run: |
+          set -eux
           rm -rf guest-assets-out
           docker buildx build \
             --platform linux/arm64 \
@@ -27,9 +105,13 @@ jobs:
             --target artifacts \
             --output type=local,dest=guest-assets-out \
             -f docker/Dockerfile .
-      - name: Stage runtime resources
+
+      - name: Stage freshly built guest resources
+        if: steps.guest-cache.outputs.cache-hit != 'true' && steps.bootstrap.outputs.bootstrapped != 'true'
+        shell: bash
         run: |
           set -eux
+          rm -rf guest-resources
           mkdir -p guest-resources/modules guest-resources/tools guest-resources/patch
           cp guest-assets-out/Image guest-resources/Image
           cp guest-assets-out/modules/*.ko guest-resources/modules/
@@ -42,22 +124,98 @@ jobs:
           cp guest-assets-out/dummy_drv.so guest-resources/patch/dummy_drv.so
           mkdir -p guest-resources/patch/vanilla-modules
           cp guest-assets-out/modules/*.ko guest-resources/patch/vanilla-modules/
+
+      - name: Verify guest resources
+        shell: bash
+        run: |
+          set -eux
+          test -f guest-resources/Image
+          test -f guest-resources/tools/ep122_shim.so
+          test -f guest-resources/tools/cfgd_aarch64
+          test -f guest-resources/patch/patch-rootfs.sh
           find guest-resources -maxdepth 3 -type f -print | sort
+
       - uses: actions/upload-artifact@v4
         with:
           name: cdj3k-emu-guest-resources
           path: guest-resources/
-          retention-days: 7
+          retention-days: 14
+
+  qemu-windows:
+    name: Build patched Windows QEMU
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Restore patched QEMU runtime cache
+        id: qemu-cache
+        uses: actions/cache@v4
+        with:
+          path: qemu/windows-out
+          key: qemu-windows-v1-${{ hashFiles('qemu/build-windows.sh', 'qemu/patches/**') }}
+
+      - name: Install MSYS2 MinGW64 build environment
+        if: steps.qemu-cache.outputs.cache-hit != 'true'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            git
+            make
+            diffutils
+            patch
+            perl
+            python
+            ninja
+            mingw-w64-x86_64-toolchain
+            mingw-w64-x86_64-meson
+            mingw-w64-x86_64-pkgconf
+            mingw-w64-x86_64-glib2
+            mingw-w64-x86_64-pixman
+            mingw-w64-x86_64-zlib
+            mingw-w64-x86_64-libslirp
+            mingw-w64-x86_64-capstone
+            mingw-w64-x86_64-libffi
+            mingw-w64-x86_64-gettext
+
+      - name: Build patched QEMU for Windows
+        if: steps.qemu-cache.outputs.cache-hit != 'true'
+        shell: msys2 {0}
+        run: bash qemu/build-windows.sh
+
+      - name: Verify patched QEMU runtime
+        shell: pwsh
+        run: |
+          @(
+            'qemu/windows-out/qemu-system-aarch64.exe',
+            'qemu/windows-out/qemu-img.exe',
+            'qemu/windows-out/README-QEMU-WINDOWS.txt'
+          ) | ForEach-Object {
+            if (-not (Test-Path $_)) { throw "Missing Windows QEMU runtime file: $_" }
+          }
+          & qemu/windows-out/qemu-system-aarch64.exe --version
+          & qemu/windows-out/qemu-img.exe --version
+          Get-ChildItem qemu/windows-out | Select-Object Name,Length
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cdj3k-emu-windows-qemu
+          path: qemu/windows-out/
+          retention-days: 14
 
   windows:
     name: Build Windows frontend
-    needs: guest-assets
+    needs: [guest-assets, qemu-windows]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
+
       - name: Install Windows firmware provisioning tools
         id: msys2
         uses: msys2/setup-msys2@v2
@@ -75,6 +233,7 @@ jobs:
             gzip
             tar
             util-linux
+
       - name: Verify bundled provisioning tools
         shell: msys2 {0}
         run: |
@@ -85,15 +244,22 @@ jobs:
           command -v bash
           command -v cpio
           command -v find
+
       - name: Cargo check workspace
         run: cargo check --workspace
       - name: Build Windows app
         run: cargo build --release -p cdj3k-emu
+
       - uses: actions/download-artifact@v4
         with:
           name: cdj3k-emu-guest-resources
           path: guest-resources
-      - name: Stage app and guest resources
+      - uses: actions/download-artifact@v4
+        with:
+          name: cdj3k-emu-windows-qemu
+          path: qemu-runtime
+
+      - name: Stage app, guest resources, QEMU and provisioning tools
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
@@ -101,26 +267,60 @@ jobs:
           Copy-Item windows/README-WINDOWS.md dist/
           Copy-Item WINDOWS_PORT_STATUS.md dist/
           Copy-Item -Recurse guest-resources dist/resources
-          # Alpha 4: bundle the MSYS2 userland required only by the firmware
-          # provisioning stage. Keeping usr/bin together also carries the DLLs
-          # that bash/cpio/find/coreutils depend on.
+
+          # Patched Windows QEMU backend.
+          New-Item -ItemType Directory -Force dist/qemu | Out-Null
+          Copy-Item -Recurse qemu-runtime/* dist/qemu/
+          # qemu-img is also copied beside the app for compatibility with older
+          # helper lookup code and troubleshooting from Command Prompt.
+          Copy-Item dist/qemu/qemu-img.exe dist/qemu-img.exe
+
+          # Firmware provisioning Unix userland.
           $msysRoot = '${{ steps.msys2.outputs.msys2-location }}'
           if (-not $msysRoot) { throw "setup-msys2 did not report an installation path" }
-          Write-Host "Bundling MSYS2 from $msysRoot"
           New-Item -ItemType Directory -Force dist/resources/msys2/usr | Out-Null
           Copy-Item -Recurse "$msysRoot/usr/bin" dist/resources/msys2/usr/bin
           if (Test-Path "$msysRoot/usr/share/terminfo") {
             New-Item -ItemType Directory -Force dist/resources/msys2/usr/share | Out-Null
             Copy-Item -Recurse "$msysRoot/usr/share/terminfo" dist/resources/msys2/usr/share/terminfo
           }
-          @('bash.exe','cpio.exe','find.exe','chmod.exe','sed.exe','grep.exe','gzip.exe') | ForEach-Object {
-            $tool = Join-Path 'dist/resources/msys2/usr/bin' $_
-            if (-not (Test-Path $tool)) { throw "Bundled provisioning tool missing: $tool" }
+
+          @(
+            'dist/cdj3k-emu.exe',
+            'dist/qemu/qemu-system-aarch64.exe',
+            'dist/qemu/qemu-img.exe',
+            'dist/qemu-img.exe',
+            'dist/resources/Image',
+            'dist/resources/msys2/usr/bin/bash.exe',
+            'dist/resources/msys2/usr/bin/cpio.exe'
+          ) | ForEach-Object {
+            if (-not (Test-Path $_)) { throw "Final Windows package missing: $_" }
           }
-          Write-Host "Staged Windows package:"
+
+          @'
+          @echo off
+          echo CDJ3K Emulator Windows QEMU self-test
+          echo.
+          qemu\qemu-system-aarch64.exe --version
+          if errorlevel 1 goto :fail
+          qemu\qemu-img.exe --version
+          if errorlevel 1 goto :fail
+          echo.
+          echo PASS: patched QEMU runtime can start.
+          pause
+          exit /b 0
+          :fail
+          echo.
+          echo FAIL: QEMU runtime could not start. Take a screenshot of this window.
+          pause
+          exit /b 1
+          '@ | Set-Content -Encoding ASCII dist/QEMU-SELFTEST.bat
+
+          Write-Host "Final Windows Alpha 5 package:"
           Get-ChildItem -Recurse dist | Select-Object FullName,Length
+
       - uses: actions/upload-artifact@v4
         with:
-          name: cdj3k-emu-windows-alpha
+          name: cdj3k-emu-windows-alpha5
           path: dist/
           retention-days: 14

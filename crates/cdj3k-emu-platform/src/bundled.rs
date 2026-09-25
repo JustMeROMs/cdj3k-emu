@@ -14,10 +14,31 @@ use std::path::PathBuf;
 pub fn tool(name: &str) -> PathBuf {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            let candidate = dir.join(name);
-            if candidate.exists() {
-                return candidate;
+            let mut candidates = vec![dir.join(name)];
+            #[cfg(windows)]
+            {
+                let exe_name = if name.to_ascii_lowercase().ends_with(".exe") {
+                    name.to_string()
+                } else {
+                    format!("{name}.exe")
+                };
+                candidates.push(dir.join(&exe_name));
+                candidates.push(dir.join("qemu").join(&exe_name));
             }
+            #[cfg(not(windows))]
+            candidates.push(dir.join("qemu").join(name));
+
+            for candidate in candidates {
+                if candidate.exists() {
+                    return candidate;
+                }
+            }
+        }
+    }
+    #[cfg(windows)]
+    {
+        if !name.to_ascii_lowercase().ends_with(".exe") {
+            return PathBuf::from(format!("{name}.exe"));
         }
     }
     PathBuf::from(name)

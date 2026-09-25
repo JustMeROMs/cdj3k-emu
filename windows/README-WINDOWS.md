@@ -1,36 +1,33 @@
-# CDJ3K Emulator – Windows port (Alpha 3)
+# CDJ3K Emulator - Windows Alpha 5
 
-This branch is an experimental Windows port of cdj3k-emu.
+This is an experimental Windows x64 port of `cdj3k-emu`.
 
-## What Alpha 3 proves
+## Package layout
 
-- The Rust/egui Windows frontend builds and launches on Windows 10/11 x64.
-- The firmware wizard opens on Windows.
-- GitHub Actions now builds the public ARM64 Linux guest runtime resources used by the emulator and packages them under `resources/` next to `cdj3k-emu.exe`.
+- `cdj3k-emu.exe` - Windows frontend
+- `qemu/` - patched Windows QEMU ARM64 backend and required DLLs
+- `qemu-img.exe` - helper used when creating/converting eMMC/USB images
+- `resources/` - guest kernel, modules, patch files and provisioning tools
+- `QEMU-SELFTEST.bat` - verifies the packaged QEMU executables can start
 
-## What is still in progress
+## First test without firmware
 
-- The initramfs patch stage still depends on Unix shell/cpio behavior. Do not expect firmware provisioning to complete on Windows yet.
-- A Windows build of the patched QEMU backend is not bundled yet.
-- Main LCD / jog LCD shared-memory transports still need their Win32 QEMU implementation.
-- Audio, USB media and Pro DJ Link will be enabled after QEMU boots reliably.
+Double-click `QEMU-SELFTEST.bat`.
 
-## Important
+A successful package should print QEMU and qemu-img version information and:
 
-Do **not** commit or upload Pioneer firmware `.UPD` files or decryption keys to GitHub. Keep them on your own computer.
+`PASS: patched QEMU runtime can start.`
 
-## Testing Alpha 3
+This self-test does not boot Pioneer firmware and does not require a key.
 
-Download the `cdj3k-emu-windows-alpha` artifact from the latest successful Windows Build workflow. Extract the whole ZIP to a normal folder before running `cdj3k-emu.exe`.
+## Firmware
 
-The package should now contain:
+The application accepts a user-supplied CDJ-3000 `.UPD` and matching key for
+local provisioning. Firmware and keys are not included in this project and
+must not be committed to GitHub.
 
-- `cdj3k-emu.exe`
-- this README
-- `WINDOWS_PORT_STATUS.md`
-- `resources/Image`
-- `resources/modules/*.ko`
-- `resources/tools/*`
-- `resources/patch/*`
+## Performance
 
-The next development milestone is a Windows-native initramfs patch/provision path.
+Windows x64 must emulate the ARM64 CDJ guest with QEMU TCG. It will be much
+slower than the Apple-Silicon/HVF build. Functional bring-up comes first;
+performance tuning follows after display/control/audio paths are validated.

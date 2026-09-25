@@ -1,0 +1,36 @@
+CDJ3K Emulator Windows Alpha 5
+==============================
+
+Goal
+----
+Add the first real Windows QEMU backend build and package it with the Windows
+frontend. Alpha 5 also stops rebuilding the unchanged ARM64 Linux guest on
+every Windows-only source change.
+
+Changes
+-------
+* New qemu/build-windows.sh builds the pinned patched QEMU source under
+  MSYS2/MINGW64 for Windows x64 using TCG ARM64 emulation.
+* The custom -display shm backend now has Win32 file mapping support
+  (CreateFileMapping / MapViewOfFile) in addition to POSIX mmap.
+* GitHub Actions now builds/caches the patched Windows QEMU backend and bundles
+  qemu-system-aarch64.exe, qemu-img.exe and required MinGW DLLs.
+* The Windows app helper resolver can find qemu-img.exe inside the qemu folder.
+* Guest resources use a content-keyed cache. For the first Alpha 5 run only,
+  the workflow may bootstrap that cache from the previous known-good Alpha 4.1
+  guest-resources artifact when the guest source hash exactly matches.
+* Final artifact is named cdj3k-emu-windows-alpha5.
+* QEMU-SELFTEST.bat is included so the packaged backend can be tested without
+  Pioneer firmware or an AES key.
+
+Expected first Alpha 5 CI behaviour
+-----------------------------------
+The guest-assets job should normally reuse the Alpha 4.1 artifact in minutes.
+The new patched-QEMU job is the main new compile stage and may reveal Windows-
+specific QEMU compiler/linker issues. Those failures are useful and should be
+fixed iteratively before firmware boot testing.
+
+Firmware / keys
+---------------
+Pioneer firmware and decryption keys are NOT included and must never be
+committed to GitHub.
