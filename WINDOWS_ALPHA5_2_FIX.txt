@@ -1,0 +1,9 @@
+CDJ3K-EMU Windows Alpha 5.2
+
+This patch removes libslirp from the Windows QEMU build dependency path.
+The previous run failed before QEMU compilation because setup-msys2 could not
+find mingw-w64-x86_64-libslirp.
+
+Alpha 5.2 intentionally builds QEMU with --disable-slirp. This lets us validate
+the patched Windows QEMU core, display transport, and self-test first. Windows
+networking / Pro DJ Link support will be restored as a separate milestone.
