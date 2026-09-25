@@ -1,0 +1,20 @@
+Alpha 5.3 fix
+===============
+
+Problem found from GitHub Actions:
+  bash: qemu/build-windows.sh: No such file or directory
+
+Cause:
+  The repository .gitignore contains qemu/* and only whitelisted qemu/build.sh,
+  qemu/patches and qemu/shim. The new Windows build script existed locally but
+  Git ignored it, so GitHub never received qemu/build-windows.sh.
+
+Fix:
+  - .gitignore now explicitly tracks !qemu/build-windows.sh
+  - qemu/build-windows.sh is included in this patch and will appear as a new
+    tracked file in GitHub Desktop after copying the patch into the repo root.
+
+Expected next run:
+  The Build patched QEMU for Windows step should now launch the script instead
+  of exiting with code 127. Any subsequent error will be from the real QEMU
+  configuration/patch/compiler stage and can be fixed next.

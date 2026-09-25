@@ -14,9 +14,10 @@ dist/
 target/
 
 # QEMU: ignore the cloned src tree, build artefacts, and install dir.
-# Track only build.sh, the overlay rsync'd onto src, and the shim sources.
+# Track the macOS/Linux and Windows build scripts, the overlay patches, and shim sources.
 qemu/*
 !qemu/build.sh
+!qemu/build-windows.sh
 !qemu/patches
 !qemu/shim
 
