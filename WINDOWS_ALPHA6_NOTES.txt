@@ -1,0 +1,29 @@
+CDJ3K-EMU Windows Alpha 6 integration patch
+
+Purpose
+-------
+Move from "QEMU binary exists" to clean Windows host/QEMU integration.
+
+Changes
+-------
+1. Windows startup now reports the exact bundled qemu-system-aarch64.exe path.
+2. If QEMU is missing, the console explains where it is expected.
+3. Every QEMU launch prints the complete command line and saves it to:
+     <runtime instance dir>\qemu-command.txt
+4. Missing firmware is treated as a normal waiting state:
+   - QEMU is not launched.
+   - expected kernel/initramfs/eMMC paths are printed clearly.
+5. Pre-boot jog/control connection messages are heavily rate-limited so an
+   unprovisioned slot does not flood the console.
+6. Alpha 5.6 Windows behavior remains: jog LCD ivshmem is temporarily disabled
+   until a native Win32 transport is implemented.
+
+Expected test without firmware/AES key
+--------------------------------------
+Launch cdj3k-emu.exe and confirm the console contains:
+  cdj3k-emu: Windows QEMU runtime detected: ...\qemu\qemu-system-aarch64.exe
+  cdj3k-emu: firmware is not provisioned for Slot 1.
+  cdj3k-emu: waiting for firmware installation - QEMU will NOT be started yet.
+
+The firmware wizard should open and the console should no longer continuously
+spam ctrl/jog connection errors.

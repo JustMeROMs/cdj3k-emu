@@ -251,10 +251,29 @@ impl QemuInstance {
         let ph = config.usb_placeholder_path();
         if !ph.exists() { prefill_sparse(&ph, 512).map_err(InstanceError::SockDir)?; }
 
-        let exe = external_qemu_exe().ok_or(InstanceError::DylibUnavailable)?;
+        let exe = external_qemu_exe().ok_or_else(|| {
+            eprintln!(
+                "cdj3k-emu: Windows QEMU runtime not found. Expected qemu-system-aarch64.exe \
+next to cdj3k-emu.exe or in the bundled qemu\\ folder. You may also set CDJ3K_QEMU_EXE."
+            );
+            InstanceError::DylibUnavailable
+        })?;
         let mut argv = config.build_argv();
         if !argv.is_empty() { argv.remove(0); }
-        eprintln!("cdj3k-emu: spawning external QEMU: {} {}", exe.display(), argv.join(" "));
+
+        eprintln!("cdj3k-emu: Windows QEMU runtime: {}", exe.display());
+        eprintln!("cdj3k-emu: spawning external QEMU:");
+        eprintln!("  {} {}", exe.display(), argv.join(" "));
+
+        // Keep an exact copy of the launch command beside the runtime files.
+        // This makes noob-friendly troubleshooting possible without asking the
+        // user to capture a fast-scrolling console.
+        let command_log = config.sock_dir().join("qemu-command.txt");
+        let _ = std::fs::write(
+            &command_log,
+            format!("{} {}\r\n", exe.display(), argv.join(" ")),
+        );
+        eprintln!("cdj3k-emu: QEMU command saved to {}", command_log.display());
         let mut child = std::process::Command::new(&exe)
             .args(&argv)
             .spawn()
@@ -384,8 +403,9 @@ fn wait_or_kill(running: &Arc<AtomicBool>, pid: u32, timeout: Duration) {
 }
 
 
+/// Locate the external QEMU executable used by non-macOS builds.
 #[cfg(not(target_os = "macos"))]
-fn external_qemu_exe() -> Option<PathBuf> {
+pub fn external_qemu_exe() -> Option<PathBuf> {
     if let Some(v) = std::env::var_os("CDJ3K_QEMU_EXE") {
         let p = PathBuf::from(v);
         if p.exists() { return Some(p); }
@@ -402,6 +422,15 @@ fn external_qemu_exe() -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// Human-readable QEMU runtime diagnostic for startup/status logging.
+#[cfg(not(target_os = "macos"))]
+pub fn external_qemu_status() -> String {
+    match external_qemu_exe() {
+        Some(p) => format!("detected: {}", p.display()),
+        None => "NOT FOUND (expected qemu\\qemu-system-aarch64.exe beside cdj3k-emu.exe)".to_string(),
+    }
 }
 
 /// Create (or truncate) `path` to be a sparse file of exactly `len` bytes.

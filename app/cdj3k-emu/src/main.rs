@@ -337,7 +337,9 @@ fn main() {
 
     #[cfg(windows)]
     {
-        use cdj3k_emu_runtime::{QemuConfig, QemuInstance};
+        use cdj3k_emu_runtime::{external_qemu_status, QemuConfig, QemuInstance};
+
+        eprintln!("cdj3k-emu: Windows QEMU runtime {}", external_qemu_status());
 
         let instance_dir = cdj3k_emu_storage::emmc::default_path(instance)
             .parent().unwrap().to_path_buf();
@@ -386,7 +388,13 @@ fn main() {
                 }
             }
         } else {
-            eprintln!("cdj3k-emu: firmware not provisioned; expected {} and {}", resolved_kernel.display(), resolved_initramfs.display());
+            eprintln!("cdj3k-emu: firmware is not provisioned for Slot {instance}.");
+            eprintln!("cdj3k-emu: waiting for firmware installation - QEMU will NOT be started yet.");
+            eprintln!("cdj3k-emu: expected kernel: {}", resolved_kernel.display());
+            eprintln!("cdj3k-emu: expected initramfs: {}", resolved_initramfs.display());
+            if !no_emmc {
+                eprintln!("cdj3k-emu: expected eMMC image: {}", emmc_path.display());
+            }
             cdj3k_emu_platform::menu_state::lock().firmware_wizard_requested = true;
             runtime_worker::spawn(None, config, prebuilt_net);
         }

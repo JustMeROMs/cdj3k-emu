@@ -166,12 +166,14 @@ fn stream_loop(
             }
             Err(e) => {
                 failed_attempts = failed_attempts.saturating_add(1);
-                if failed_attempts == 1 || failed_attempts.is_multiple_of(10) {
+                // Before firmware is provisioned/QEMU starts, refusal is
+                // expected. Keep one useful diagnostic, then rate-limit to
+                // roughly once every five minutes.
+                if failed_attempts == 1 || failed_attempts.is_multiple_of(150) {
                     eprintln!(
-                        "[ctrl] connect {}: {} (attempt {failed_attempts}, retrying in {:?})",
+                        "[ctrl] waiting for QEMU control channel {}: {} (attempt {failed_attempts})",
                         sock_path.display(),
-                        e,
-                        RECONNECT_DELAY
+                        e
                     );
                 }
                 thread::sleep(RECONNECT_DELAY);
