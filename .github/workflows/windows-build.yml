@@ -320,11 +320,154 @@ jobs:
           exit /b 1
           '@ | Set-Content -Encoding ASCII dist/QEMU-SELFTEST.bat
 
-          Write-Host "Final Windows Alpha 5 package:"
+          @'
+          @echo off
+          setlocal EnableExtensions
+          title CDJ3K Emulator Alpha 6.5 Host Integration Self-Test
+          cd /d "%~dp0"
+
+          echo ============================================================
+          echo CDJ3K Emulator Alpha 6.5 - NO-KEY Host Integration Self-Test
+          echo ============================================================
+          echo.
+          echo This test does NOT need Pioneer firmware or an AES key.
+          echo It checks the Windows host runtime we can develop right now.
+          echo.
+
+          set FAIL=0
+
+          call :checkfile "cdj3k-emu.exe"
+          call :checkfile "qemu\qemu-system-aarch64.exe"
+          call :checkfile "qemu\qemu-img.exe"
+          call :checkfile "resources\Image"
+          call :checkfile "resources\msys2\usr\bin\bash.exe"
+          call :checkfile "resources\msys2\usr\bin\cpio.exe"
+          call :checkfile "resources\msys2\usr\bin\find.exe"
+          call :checkfile "resources\msys2\usr\bin\gzip.exe"
+
+          echo.
+          echo [TEST] QEMU ARM64 version...
+          qemu\qemu-system-aarch64.exe --version
+          if errorlevel 1 (
+            echo [FAIL] qemu-system-aarch64.exe could not run
+            set FAIL=1
+          ) else (
+            echo [PASS] QEMU executable starts
+          )
+
+          echo.
+          echo [TEST] qemu-img version...
+          qemu\qemu-img.exe --version
+          if errorlevel 1 (
+            echo [FAIL] qemu-img.exe could not run
+            set FAIL=1
+          ) else (
+            echo [PASS] qemu-img executable starts
+          )
+
+          echo.
+          echo [TEST] Custom shared-memory display backend registration...
+          qemu\qemu-system-aarch64.exe -display help 2>&1 | findstr /I /C:"shm" >nul
+          if errorlevel 1 (
+            echo [FAIL] QEMU did not advertise the custom "shm" display backend
+            set FAIL=1
+          ) else (
+            echo [PASS] Custom "shm" display backend is registered
+          )
+
+          echo.
+          echo [TEST] TCG ARM64 virtual machine startup...
+          set TESTLOG=%TEMP%\cdj3k-qemu-host-selftest.log
+          del /q "%TESTLOG%" >nul 2>&1
+          start "" /b qemu\qemu-system-aarch64.exe ^
+            -machine virt ^
+            -accel tcg ^
+            -cpu cortex-a72 ^
+            -m 128 ^
+            -nodefaults ^
+            -display none ^
+            -monitor none ^
+            -serial none ^
+            -S >"%TESTLOG%" 2>&1
+
+          timeout /t 3 /nobreak >nul
+          tasklist /FI "IMAGENAME eq qemu-system-aarch64.exe" | find /I "qemu-system-aarch64.exe" >nul
+          if errorlevel 1 (
+            echo [FAIL] ARM64 TCG VM did not stay running
+            echo.
+            if exist "%TESTLOG%" type "%TESTLOG%"
+            set FAIL=1
+          ) else (
+            echo [PASS] ARM64 TCG VM starts and stays alive
+            taskkill /IM qemu-system-aarch64.exe /F >nul 2>&1
+          )
+
+          echo.
+          echo [TEST] Writable runtime directory...
+          set TESTDIR=%TEMP%\cdj3k-alpha65-selftest
+          rmdir /s /q "%TESTDIR%" >nul 2>&1
+          mkdir "%TESTDIR%" >nul 2>&1
+          echo ok>"%TESTDIR%\write-test.txt"
+          if exist "%TESTDIR%\write-test.txt" (
+            echo [PASS] Windows temp/runtime directory is writable
+          ) else (
+            echo [FAIL] Could not write to Windows temp/runtime directory
+            set FAIL=1
+          )
+          rmdir /s /q "%TESTDIR%" >nul 2>&1
+
+          echo.
+          echo ============================================================
+          if "%FAIL%"=="0" (
+            echo PASS: Alpha 6.5 host integration checks all passed.
+            echo We can keep developing Windows/QEMU integration without
+            echo the proprietary firmware decryption key.
+          ) else (
+            echo FAIL: One or more host integration checks failed.
+            echo Take a screenshot of this window and send it back.
+          )
+          echo ============================================================
+          echo.
+          pause
+          exit /b %FAIL%
+
+          :checkfile
+          if exist %1 (
+            echo [PASS] Found %~1
+          ) else (
+            echo [FAIL] Missing %~1
+            set FAIL=1
+          )
+          exit /b 0
+          '@ | Set-Content -Encoding ASCII dist/WINDOWS-HOST-SELFTEST.bat
+
+          @'
+          ALPHA 6.5 - NO-KEY DEVELOPMENT BUILD
+
+          You do not need a CDJ-3000 AES/decryption key to run the host tests.
+
+          Run these first:
+            QEMU-SELFTEST.bat
+            WINDOWS-HOST-SELFTEST.bat
+
+          WINDOWS-HOST-SELFTEST checks:
+            - packaged Windows executable
+            - QEMU + qemu-img
+            - guest kernel resource
+            - bundled provisioning tools
+            - custom shm display backend registration
+            - ARM64 TCG virtual machine startup
+            - writable Windows runtime directory
+
+          Firmware installation still correctly requires a compatible key.
+          This build does not bypass, derive, or include that key.
+          '@ | Set-Content -Encoding ASCII dist/README-ALPHA6.5-NO-KEY.txt
+
+          Write-Host "Final Windows Alpha 6.5 package:"
           Get-ChildItem -Recurse dist | Select-Object FullName,Length
 
       - uses: actions/upload-artifact@v4
         with:
-          name: cdj3k-emu-windows-alpha5
+          name: cdj3k-emu-windows-alpha6.5
           path: dist/
           retention-days: 14

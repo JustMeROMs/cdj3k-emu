@@ -1,0 +1,26 @@
+CDJ3K-EMU Windows Alpha 6.5 - No-key development milestone
+
+Reason
+------
+The Windows port can continue making useful progress even when the user does
+not yet have the proprietary firmware decryption key.
+
+Changes
+-------
+- Final GitHub artifact is now clearly named:
+    cdj3k-emu-windows-alpha6.5
+- Adds WINDOWS-HOST-SELFTEST.bat.
+- Adds README-ALPHA6.5-NO-KEY.txt.
+
+The host self-test requires NO Pioneer firmware and NO AES key. It checks:
+- cdj3k-emu.exe is packaged
+- qemu-system-aarch64.exe runs
+- qemu-img.exe runs
+- guest Image is packaged
+- bundled provisioning tools are packaged
+- custom QEMU "shm" display backend is registered
+- a minimal ARM64 TCG virtual machine can start and remain running
+- the Windows runtime/temp directory is writable
+
+This does not bypass firmware encryption. Actual CDJ-3000 firmware provisioning
+still requires a legitimately obtained compatible decryption key.
