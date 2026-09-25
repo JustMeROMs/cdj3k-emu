@@ -1,0 +1,19 @@
+CDJ3K-EMU Windows Alpha 6.6 - App-to-QEMU integration self-test
+
+New:
+- cdj3k-emu.exe --windows-host-test
+- APP-QEMU-SELFTEST.bat
+
+This test requires NO CDJ-3000 firmware and NO AES key.
+
+It verifies the actual Rust app can:
+- locate bundled qemu-system-aarch64.exe
+- create a clean Windows runtime directory
+- spawn an ARM64 TCG VM
+- start the custom shm display backend
+- observe main.shm creation
+- keep QEMU alive for at least 3 seconds
+- terminate QEMU cleanly
+- write command and QEMU log files
+
+This does not bypass or derive the proprietary firmware decryption key.

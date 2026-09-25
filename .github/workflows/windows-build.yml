@@ -463,11 +463,36 @@ jobs:
           This build does not bypass, derive, or include that key.
           '@ | Set-Content -Encoding ASCII dist/README-ALPHA6.5-NO-KEY.txt
 
-          Write-Host "Final Windows Alpha 6.5 package:"
+          
+          @'
+          @echo off
+          title CDJ3K Emulator Alpha 6.6 App-to-QEMU Integration Test
+          cd /d "%~dp0"
+          echo ============================================================
+          echo CDJ3K Emulator Alpha 6.6 - APP TO QEMU TEST
+          echo ============================================================
+          echo.
+          echo No Pioneer firmware or AES key is required.
+          echo.
+          cdj3k-emu.exe --windows-host-test
+          set RC=%ERRORLEVEL%
+          echo.
+          if "%RC%"=="0" (
+            echo PASS: app-to-QEMU integration test succeeded.
+          ) else (
+            echo FAIL: app-to-QEMU integration test failed.
+            echo Take a screenshot of this window and send it back.
+          )
+          echo.
+          pause
+          exit /b %RC%
+          '@ | Set-Content -Encoding ASCII dist/APP-QEMU-SELFTEST.bat
+
+          Write-Host "Final Windows Alpha 6.6 package:"
           Get-ChildItem -Recurse dist | Select-Object FullName,Length
 
       - uses: actions/upload-artifact@v4
         with:
-          name: cdj3k-emu-windows-alpha6.5
+          name: cdj3k-emu-windows-alpha6.6
           path: dist/
           retention-days: 14

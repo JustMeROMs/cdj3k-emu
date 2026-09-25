@@ -50,6 +50,22 @@ fn configure_helvetica_medium(ctx: &egui::Context) {
 }
 
 fn main() {
+    #[cfg(windows)]
+    {
+        if std::env::args().any(|a| a == "--windows-host-test") {
+            match run_windows_host_test() {
+                Ok(()) => {
+                    println!("cdj3k-emu host-test: PASS");
+                    return;
+                }
+                Err(e) => {
+                    eprintln!("cdj3k-emu host-test: FAIL: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
+
     let args: Vec<String> = std::env::args().collect();
 
     // ── Worker mode ───────────────────────────────────────────────────────
@@ -461,4 +477,103 @@ fn main() {
         }),
     )
     .unwrap();
+}
+
+
+#[cfg(windows)]
+fn run_windows_host_test() -> Result<(), String> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    use std::thread;
+    use std::time::Duration;
+
+    use cdj3k_emu_runtime::external_qemu_exe;
+
+    let exe = external_qemu_exe()
+        .ok_or_else(|| "bundled qemu-system-aarch64.exe was not found".to_string())?;
+
+    let base = std::env::temp_dir().join("cdj3k-emu-hosttest");
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base)
+        .map_err(|e| format!("create temp test dir {}: {e}", base.display()))?;
+
+    let shm = base.join("main.shm");
+    let log = base.join("qemu-hosttest.log");
+    let cmd_txt = base.join("qemu-hosttest-command.txt");
+
+    let argv = vec![
+        "-machine".to_string(), "virt".to_string(),
+        "-accel".to_string(), "tcg".to_string(),
+        "-cpu".to_string(), "cortex-a72".to_string(),
+        "-m".to_string(), "128".to_string(),
+        "-nodefaults".to_string(),
+        "-display".to_string(), format!("shm,path={}", shm.display()),
+        "-monitor".to_string(), "none".to_string(),
+        "-serial".to_string(), "none".to_string(),
+        "-S".to_string(),
+    ];
+
+    std::fs::write(
+        &cmd_txt,
+        format!("{} {}\r\n", exe.display(), argv.join(" ")),
+    ).map_err(|e| format!("write command log: {e}"))?;
+
+    println!("cdj3k-emu host-test: QEMU {}", exe.display());
+    println!("cdj3k-emu host-test: runtime dir {}", base.display());
+    println!("cdj3k-emu host-test: launching minimal ARM64 VM with shm display backend");
+
+    let stdout_file = std::fs::File::create(&log)
+        .map_err(|e| format!("create qemu log: {e}"))?;
+    let stderr_file = stdout_file
+        .try_clone()
+        .map_err(|e| format!("clone qemu log handle: {e}"))?;
+
+    let mut child = Command::new(&exe)
+        .args(&argv)
+        .stdout(Stdio::from(stdout_file))
+        .stderr(Stdio::from(stderr_file))
+        .spawn()
+        .map_err(|e| format!("spawn QEMU: {e}"))?;
+
+    thread::sleep(Duration::from_secs(3));
+
+    match child.try_wait() {
+        Ok(Some(status)) => {
+            let mut msg = format!("QEMU exited too early with {status}");
+            if let Ok(mut f) = std::fs::File::open(&log) {
+                let mut buf = String::new();
+                let _ = f.read_to_string(&mut buf);
+                if !buf.trim().is_empty() {
+                    msg.push_str(&format!("\nQEMU log:\n{buf}"));
+                }
+            }
+            return Err(msg);
+        }
+        Ok(None) => {}
+        Err(e) => return Err(format!("query QEMU status: {e}")),
+    }
+
+    if !shm.exists() {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(format!(
+            "custom shm display backend did not create {}",
+            shm.display()
+        ));
+    }
+
+    let meta = std::fs::metadata(&shm)
+        .map_err(|e| format!("stat {}: {e}", shm.display()))?;
+    println!("cdj3k-emu host-test: main.shm created ({} bytes)", meta.len());
+
+    child.kill()
+        .map_err(|e| format!("terminate QEMU test process: {e}"))?;
+    let _ = child.wait();
+    thread::sleep(Duration::from_millis(250));
+
+    println!("cdj3k-emu host-test: QEMU process stopped cleanly");
+    println!("cdj3k-emu host-test: command log {}", cmd_txt.display());
+    println!("cdj3k-emu host-test: qemu log {}", log.display());
+
+    Ok(())
 }
