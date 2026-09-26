@@ -298,3 +298,180 @@ fn read_u32_acquire(mmap: &Mmap, offset: usize) -> u32 {
     // accesses to the same word.
     unsafe { (*ptr).load(Ordering::Acquire) }
 }
+
+
+/// Result of the Windows synthetic main-display pipeline diagnostic.
+#[derive(Debug, Clone)]
+pub struct SyntheticDisplayTestResult {
+    pub frames_seen: u32,
+    pub dirty_notifications: u32,
+    pub width: u32,
+    pub height: u32,
+    pub stride: u32,
+    pub duration_ms: u128,
+    pub approx_fps: f64,
+    pub sample_rgba: [u8; 4],
+}
+
+/// Exercise the same `main.shm` reader used by the real LCD path without
+/// requiring CDJ firmware. A synthetic producer writes a moving RGBA pattern
+/// into a valid QEMU shm-display file and bumps `generation` at ~60 Hz.
+///
+/// This verifies:
+/// - header layout / dimensions / stride
+/// - generation polling
+/// - dirty-region delivery
+/// - pixel visibility through the mmap reader
+#[cfg(windows)]
+pub fn run_synthetic_display_test(ctx: egui::Context) -> Result<SyntheticDisplayTestResult, String> {
+    use memmap2::MmapMut;
+    use std::fs::OpenOptions;
+    use std::sync::atomic::{AtomicU32 as StdAtomicU32, Ordering as StdOrdering};
+    use std::time::Instant;
+
+    const W: usize = 1280;
+    const H: usize = 720;
+    const STRIDE: usize = W * 4;
+    const LEN: usize = SHM_PIXELS_OFFSET + STRIDE * H;
+    const TEST_FRAMES: u32 = 90;
+
+    let dir = std::env::temp_dir().join("cdj3k-emu-displaytest");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("create display-test directory {}: {e}", dir.display()))?;
+    let path = dir.join("main.shm");
+
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&path)
+        .map_err(|e| format!("create {}: {e}", path.display()))?;
+    file.set_len(LEN as u64)
+        .map_err(|e| format!("resize {}: {e}", path.display()))?;
+
+    let mut mmap = unsafe { MmapMut::map_mut(&file) }
+        .map_err(|e| format!("mmap {}: {e}", path.display()))?;
+
+    fn put_u32(buf: &mut [u8], off: usize, v: u32) {
+        buf[off..off + 4].copy_from_slice(&v.to_le_bytes());
+    }
+
+    put_u32(&mut mmap, 0, SHM_MAGIC);
+    put_u32(&mut mmap, 4, 0);
+    put_u32(&mut mmap, 8, W as u32);
+    put_u32(&mut mmap, 12, H as u32);
+    put_u32(&mut mmap, 16, STRIDE as u32);
+    put_u32(&mut mmap, 20, 1);
+    put_u32(&mut mmap, 24, 0);
+    put_u32(&mut mmap, 28, 0);
+    put_u32(&mut mmap, 32, W as u32);
+    put_u32(&mut mmap, 36, H as u32);
+
+    // Initial pattern: horizontal/vertical gradient.
+    for y in 0..H {
+        for x in 0..W {
+            let off = SHM_PIXELS_OFFSET + y * STRIDE + x * 4;
+            mmap[off] = ((x * 255) / (W - 1)) as u8;
+            mmap[off + 1] = ((y * 255) / (H - 1)) as u8;
+            mmap[off + 2] = 64;
+            mmap[off + 3] = 255;
+        }
+    }
+    mmap.flush().ok();
+
+    let gate = crate::RepaintGate::new_60fps(ctx);
+    let stream = MainLcdStream::new(&dir.to_string_lossy(), gate);
+
+    // Give the reader time to map the freshly-created file.
+    let connect_deadline = Instant::now() + Duration::from_secs(3);
+    while !stream.is_connected() && Instant::now() < connect_deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+    if !stream.is_connected() {
+        return Err("MainLcdStream did not connect to synthetic main.shm".to_string());
+    }
+
+    let start = Instant::now();
+    let mut dirty_notifications = 0u32;
+    let mut last_sample = [0u8; 4];
+
+    for frame in 1..=TEST_FRAMES {
+        // A moving 96x96 square provides a realistic small dirty rectangle.
+        let box_w = 96usize;
+        let box_h = 96usize;
+        let x0 = ((frame as usize * 13) % (W - box_w)).max(1);
+        let y0 = ((frame as usize * 7) % (H - box_h)).max(1);
+
+        for y in y0..y0 + box_h {
+            for x in x0..x0 + box_w {
+                let off = SHM_PIXELS_OFFSET + y * STRIDE + x * 4;
+                mmap[off] = (frame.wrapping_mul(3) & 0xff) as u8;
+                mmap[off + 1] = (255u32.wrapping_sub(frame * 2) & 0xff) as u8;
+                mmap[off + 2] = ((x + y) & 0xff) as u8;
+                mmap[off + 3] = 255;
+            }
+        }
+
+        put_u32(&mut mmap, 24, x0 as u32);
+        put_u32(&mut mmap, 28, y0 as u32);
+        put_u32(&mut mmap, 32, box_w as u32);
+        put_u32(&mut mmap, 36, box_h as u32);
+
+        // RELEASE-store generation just like QEMU's shm backend.
+        let gen_ptr = unsafe { mmap.as_mut_ptr().add(4) as *mut StdAtomicU32 };
+        unsafe { (&*gen_ptr).store(frame, StdOrdering::Release) };
+
+        thread::sleep(Duration::from_millis(17));
+
+        if let Some(dirty) = stream.take() {
+            dirty_notifications += 1;
+            let off = SHM_PIXELS_OFFSET
+                + dirty.y as usize * dirty.stride as usize
+                + dirty.x as usize * 4;
+            if off + 4 <= dirty.mmap.len() {
+                last_sample.copy_from_slice(&dirty.mmap[off..off + 4]);
+            }
+        }
+    }
+
+    // Allow final generation to be observed.
+    thread::sleep(Duration::from_millis(100));
+    while let Some(dirty) = stream.take() {
+        dirty_notifications += 1;
+        let off = SHM_PIXELS_OFFSET
+            + dirty.y as usize * dirty.stride as usize
+            + dirty.x as usize * 4;
+        if off + 4 <= dirty.mmap.len() {
+            last_sample.copy_from_slice(&dirty.mmap[off..off + 4]);
+        }
+    }
+
+    let elapsed = start.elapsed();
+    let frames_seen = stream.frames_seen();
+    if frames_seen < TEST_FRAMES / 2 {
+        return Err(format!(
+            "MainLcdStream observed too few frame generations: {frames_seen}/{TEST_FRAMES}"
+        ));
+    }
+    if dirty_notifications == 0 {
+        return Err("MainLcdStream produced no dirty notifications".to_string());
+    }
+
+    // Clear magic so the reader exits its poll loop cleanly.
+    put_u32(&mut mmap, 0, 0);
+    mmap.flush().ok();
+
+    let seconds = elapsed.as_secs_f64().max(0.001);
+    Ok(SyntheticDisplayTestResult {
+        frames_seen,
+        dirty_notifications,
+        width: W as u32,
+        height: H as u32,
+        stride: STRIDE as u32,
+        duration_ms: elapsed.as_millis(),
+        approx_fps: frames_seen as f64 / seconds,
+        sample_rgba: last_sample,
+    })
+}

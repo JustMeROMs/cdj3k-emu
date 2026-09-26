@@ -1,0 +1,20 @@
+CDJ3K-EMU Windows Alpha 6.8 - Synthetic Display Pipeline Diagnostics
+
+Adds a no-firmware/no-key display pipeline test to System Diagnostics.
+
+New "Run Display Test" verifies:
+- valid 1280x720 main.shm header layout
+- 5120-byte RGBA stride
+- synthetic frame generation at approximately 60 Hz
+- MainLcdStream connects to main.shm
+- generation counter changes are observed
+- dirty rectangles are delivered to the UI side
+- pixel bytes are visible through the shared mmap
+- frame count / dirty count / approximate reader FPS are reported
+
+This exercises:
+  synthetic producer -> main.shm -> MainLcdStream -> diagnostics UI
+
+It does not require or bypass CDJ-3000 firmware encryption. It does not yet
+exercise the final OpenGL texture upload, which remains part of full guest/UI
+integration once real firmware is available.

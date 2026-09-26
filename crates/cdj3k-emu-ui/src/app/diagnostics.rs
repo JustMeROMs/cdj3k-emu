@@ -22,6 +22,7 @@ impl Default for TestState {
 pub struct DiagnosticsWindow {
     pub open: bool,
     test: Arc<Mutex<TestState>>,
+    display_test: Arc<Mutex<TestState>>,
     focused_after_open: bool,
 }
 
@@ -30,6 +31,7 @@ impl DiagnosticsWindow {
         Self {
             open: false,
             test: Arc::new(Mutex::new(TestState::default())),
+            display_test: Arc::new(Mutex::new(TestState::default())),
             focused_after_open: false,
         }
     }
@@ -44,6 +46,7 @@ impl DiagnosticsWindow {
         let close_inner = close_flag.clone();
         let need_focus = !self.focused_after_open;
         let test = self.test.clone();
+        let display_test = self.display_test.clone();
 
         ctx.show_viewport_immediate(
             egui::ViewportId::from_hash_of("windows_system_diagnostics"),
@@ -113,6 +116,69 @@ impl DiagnosticsWindow {
                                 open_logs_folder();
                             }
                         });
+
+                        ui.add_space(8.0);
+                        let display_snapshot = display_test.lock().unwrap().clone();
+                        ui.horizontal(|ui| {
+                            let run_display = Button::new(
+                                RichText::new(if display_snapshot.running {
+                                    "Running Display Test…"
+                                } else {
+                                    "Run Display Test"
+                                })
+                                .strong()
+                                .color(Color32::WHITE),
+                            )
+                            .fill(Color32::from_rgb(120, 85, 175));
+
+                            if ui
+                                .add_enabled(!display_snapshot.running, run_display)
+                                .clicked()
+                            {
+                                run_display_test(display_test.clone(), ctx.clone());
+                            }
+
+                            ui.label(
+                                RichText::new("Synthetic 1280×720 main.shm pipeline")
+                                    .size(10.5)
+                                    .color(Color32::from_rgb(145, 150, 158)),
+                            );
+                        });
+
+                        if display_snapshot.running || display_snapshot.result.is_some() {
+                            ui.add_space(6.0);
+                            let display_text = match &display_snapshot.result {
+                                None if display_snapshot.running => "Running…".to_string(),
+                                None => "Not run yet".to_string(),
+                                Some(Ok(s)) => format!("PASS\n{s}"),
+                                Some(Err(e)) => format!("FAIL\n{e}"),
+                            };
+                            let display_ok = matches!(&display_snapshot.result, Some(Ok(_)));
+                            Frame::default()
+                                .fill(Color32::from_rgb(14, 15, 17))
+                                .stroke(Stroke::new(
+                                    1.0,
+                                    if display_ok {
+                                        Color32::from_rgb(115, 80, 170)
+                                    } else {
+                                        Color32::from_rgb(55, 58, 64)
+                                    },
+                                ))
+                                .rounding(Rounding::same(6.0))
+                                .inner_margin(Margin::same(10.0))
+                                .show(ui, |ui| {
+                                    ui.label(
+                                        RichText::new(display_text)
+                                            .monospace()
+                                            .size(10.5)
+                                            .color(if display_ok {
+                                                Color32::from_rgb(195, 170, 235)
+                                            } else {
+                                                Color32::from_rgb(195, 198, 205)
+                                            }),
+                                    );
+                                });
+                        }
 
                         ui.add_space(12.0);
                         ui.label(
@@ -343,4 +409,51 @@ fn bundled_resources() -> std::path::PathBuf {
         }
     }
     std::path::PathBuf::from("resources")
+}
+
+
+#[cfg(windows)]
+fn run_display_test(test: Arc<Mutex<TestState>>, ctx: Context) {
+    {
+        let mut state = test.lock().unwrap();
+        state.running = true;
+        state.result = None;
+    }
+
+    std::thread::Builder::new()
+        .name("cdj3k-display-diagnostics".into())
+        .spawn(move || {
+            let result = match cdj3k_emu_streams::main_stream::run_synthetic_display_test(
+                ctx.clone(),
+            ) {
+                Ok(r) => Ok(format!(
+                    "Resolution: {}×{}\nStride: {} bytes\nFrames observed: {}\nDirty notifications: {}\nElapsed: {} ms\nApprox reader FPS: {:.1}\nSample RGBA: {:?}",
+                    r.width,
+                    r.height,
+                    r.stride,
+                    r.frames_seen,
+                    r.dirty_notifications,
+                    r.duration_ms,
+                    r.approx_fps,
+                    r.sample_rgba
+                )),
+                Err(e) => Err(e),
+            };
+            {
+                let mut state = test.lock().unwrap();
+                state.running = false;
+                state.result = Some(result);
+            }
+            ctx.request_repaint();
+        })
+        .ok();
+}
+
+#[cfg(not(windows))]
+fn run_display_test(test: Arc<Mutex<TestState>>, ctx: Context) {
+    let mut state = test.lock().unwrap();
+    state.running = false;
+    state.result = Some(Ok("Synthetic Windows display pipeline test is Windows-only".to_string()));
+    drop(state);
+    ctx.request_repaint();
 }
