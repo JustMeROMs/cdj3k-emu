@@ -177,6 +177,45 @@ fn main() {
         .to_string_lossy()
         .into_owned();
 
+    // Alpha 7.4 Windows runtime hygiene:
+    // clear stale transport files left behind by an interrupted/crashed run
+    // before any stream reader or QEMU process is started.
+    #[cfg(windows)]
+    {
+        let runtime_dir = std::path::PathBuf::from(&socket_dir);
+        if let Err(e) = std::fs::create_dir_all(&runtime_dir) {
+            eprintln!(
+                "cdj3k-emu: warning: could not create Windows runtime dir {}: {e}",
+                runtime_dir.display()
+            );
+        } else {
+            for name in [
+                "main.shm",
+                "jog.shm",
+                "ctrl.sock",
+                "qmp.sock",
+                "serial.log",
+            ] {
+                let stale = runtime_dir.join(name);
+                if stale.exists() {
+                    match std::fs::remove_file(&stale) {
+                        Ok(()) => eprintln!(
+                            "cdj3k-emu: removed stale runtime file {}",
+                            stale.display()
+                        ),
+                        Err(e) => eprintln!(
+                            "cdj3k-emu: warning: could not remove stale runtime file {}: {e}",
+                            stale.display()
+                        ),
+                    }
+                }
+            }
+        }
+
+        // Reuse the runtime crate's shutdown cleanup path on Windows as well.
+        let _ = cdj3k_emu_runtime::SHUTDOWN_SOCK_DIR.set(runtime_dir);
+    }
+
     // ── QEMU lifecycle ────────────────────────────────────────────────────
     // Two modes:
     //   --kernel/--initramfs  dev: explicit path override (boot immediately)
@@ -463,7 +502,7 @@ fn main() {
     );
     cdj3k_emu_platform::desktop::set_app_name(&app_name);
 
-    eframe::run_native(
+    let run_result = eframe::run_native(
         &app_name,
         options,
         Box::new(move |cc| {
@@ -475,8 +514,19 @@ fn main() {
                 profile,
             )))
         }),
-    )
-    .unwrap();
+    );
+
+    // Alpha 7.4: make the Windows shutdown path deterministic even when the
+    // UI closes normally.  Stop an owned QEMU child first, then remove stale
+    // transport files so the next launch starts clean.
+    #[cfg(windows)]
+    {
+        cdj3k_emu_runtime::kill_qemu_child_now();
+        cdj3k_emu_runtime::cleanup_runtime_files();
+        eprintln!("cdj3k-emu: Windows runtime cleanup complete");
+    }
+
+    run_result.unwrap();
 }
 
 

@@ -1,0 +1,35 @@
+CDJ3K-EMU Windows Alpha 7.4 - Runtime lifecycle hardening
+
+Focus
+-----
+Move from synthetic diagnostics toward a cleaner production Windows runtime.
+
+Changes
+-------
+- Creates the per-instance Windows runtime directory before startup.
+- Removes stale transport files from an interrupted/crashed previous run:
+    main.shm
+    jog.shm
+    ctrl.sock
+    qmp.sock
+    serial.log
+- Registers the Windows runtime directory with SHUTDOWN_SOCK_DIR so the runtime
+  cleanup code is shared with the existing lifecycle implementation.
+- On normal GUI shutdown:
+    1. asks the runtime to terminate the owned QEMU child immediately
+    2. runs cleanup_runtime_files()
+    3. logs "Windows runtime cleanup complete"
+- Keeps cleanup scoped to the current emulator instance/runtime directory.
+
+What this does NOT change
+-------------------------
+- Firmware decryption/provisioning remains blocked without a compatible AES key.
+- No Pioneer/AlphaTheta key is included, generated, derived or bypassed.
+- Existing Alpha 7.x QEMU/display diagnostics are unchanged.
+
+Recommended tests
+-----------------
+1. Launch with firmware not provisioned; wizard should still open normally.
+2. Close the emulator, reopen it, and confirm there are no stale main.shm /
+   control files causing reconnect problems.
+3. Run the existing Host, QEMU Display, Live QEMU, and 5-Cycle tests.
