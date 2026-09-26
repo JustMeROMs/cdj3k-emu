@@ -599,8 +599,12 @@ pub struct LiveQemuDisplayResult {
     pub frames_written: u32,
     pub frames_observed: u32,
     pub dirty_notifications: u32,
+    pub dropped_generations: u32,
     pub duration_ms: u128,
     pub observed_fps: f64,
+    pub avg_frame_interval_ms: f64,
+    pub min_frame_interval_ms: f64,
+    pub max_frame_interval_ms: f64,
     pub final_rgba: Vec<u8>,
 }
 
@@ -692,6 +696,10 @@ where
 
     let start = Instant::now();
     let mut dirty_notifications = 0u32;
+    let mut dropped_generations = 0u32;
+    let mut intervals_ms: Vec<f64> = Vec::new();
+    let mut last_observed_at: Option<Instant> = None;
+    let mut last_seen_generation = stream.frames_seen();
     let base_generation = get_u32(&mmap, 4);
 
     // Draw a moving high-contrast bar at ~30 FPS for a few seconds.
@@ -739,6 +747,18 @@ where
 
         if let Some(_) = stream.take() {
             dirty_notifications += 1;
+            let now = Instant::now();
+            if let Some(prev) = last_observed_at {
+                intervals_ms.push((now - prev).as_secs_f64() * 1000.0);
+            }
+            last_observed_at = Some(now);
+
+            let current_seen = stream.frames_seen();
+            if current_seen > last_seen_generation + 1 {
+                dropped_generations = dropped_generations
+                    .saturating_add(current_seen - last_seen_generation - 1);
+            }
+            last_seen_generation = current_seen;
         }
 
         // Push a UI preview roughly every 3 frames (~10 FPS) so the diagnostics
@@ -779,6 +799,22 @@ where
     }
 
     let secs = elapsed.as_secs_f64().max(0.001);
+    let (avg_frame_interval_ms, min_frame_interval_ms, max_frame_interval_ms) =
+        if intervals_ms.is_empty() {
+            (0.0, 0.0, 0.0)
+        } else {
+            let sum: f64 = intervals_ms.iter().sum();
+            let min = intervals_ms
+                .iter()
+                .copied()
+                .fold(f64::INFINITY, f64::min);
+            let max = intervals_ms
+                .iter()
+                .copied()
+                .fold(0.0_f64, f64::max);
+            (sum / intervals_ms.len() as f64, min, max)
+        };
+
     Ok(LiveQemuDisplayResult {
         width,
         height,
@@ -786,8 +822,12 @@ where
         frames_written: frames,
         frames_observed,
         dirty_notifications,
+        dropped_generations,
         duration_ms: elapsed.as_millis(),
         observed_fps: frames_observed as f64 / secs,
+        avg_frame_interval_ms,
+        min_frame_interval_ms,
+        max_frame_interval_ms,
         final_rgba,
     })
 }

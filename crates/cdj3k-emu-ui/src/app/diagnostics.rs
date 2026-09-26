@@ -27,6 +27,7 @@ pub struct DiagnosticsWindow {
     qemu_display_preview: Arc<Mutex<Option<egui::ColorImage>>>,
     live_qemu_test: Arc<Mutex<TestState>>,
     live_qemu_preview: Arc<Mutex<Option<egui::ColorImage>>>,
+    qemu_stress_test: Arc<Mutex<TestState>>,
     /// Captured framebuffer from the synthetic main.shm pipeline. Kept as a
     /// ColorImage so the diagnostics viewport can upload it through egui's
     /// texture manager and visibly render the same bytes the stream observed.
@@ -44,6 +45,7 @@ impl DiagnosticsWindow {
             qemu_display_preview: Arc::new(Mutex::new(None)),
             live_qemu_test: Arc::new(Mutex::new(TestState::default())),
             live_qemu_preview: Arc::new(Mutex::new(None)),
+            qemu_stress_test: Arc::new(Mutex::new(TestState::default())),
             display_preview: Arc::new(Mutex::new(None)),
             focused_after_open: false,
         }
@@ -64,6 +66,7 @@ impl DiagnosticsWindow {
         let qemu_display_preview = self.qemu_display_preview.clone();
         let live_qemu_test = self.live_qemu_test.clone();
         let live_qemu_preview = self.live_qemu_preview.clone();
+        let qemu_stress_test = self.qemu_stress_test.clone();
         let display_preview = self.display_preview.clone();
 
         ctx.show_viewport_immediate(
@@ -312,6 +315,67 @@ impl DiagnosticsWindow {
                                     ui.image((texture.id(), egui::vec2(max_w, max_w * aspect)));
                                 }
                             }
+                        }
+
+                        ui.add_space(8.0);
+                        let stress_snapshot = qemu_stress_test.lock().unwrap().clone();
+                        ui.horizontal(|ui| {
+                            let run_stress = Button::new(
+                                RichText::new(if stress_snapshot.running {
+                                    "Running 5-Cycle Stress Test…"
+                                } else {
+                                    "Run 5-Cycle Stress Test"
+                                })
+                                .strong()
+                                .color(Color32::WHITE),
+                            )
+                            .fill(Color32::from_rgb(165, 75, 75));
+
+                            if ui.add_enabled(!stress_snapshot.running, run_stress).clicked() {
+                                run_qemu_stress_test(qemu_stress_test.clone(), ctx.clone());
+                            }
+
+                            ui.label(
+                                RichText::new("Launch/stop QEMU 5× and verify cleanup")
+                                    .size(10.5)
+                                    .color(Color32::from_rgb(145, 150, 158)),
+                            );
+                        });
+
+                        if stress_snapshot.running || stress_snapshot.result.is_some() {
+                            ui.add_space(6.0);
+                            let stress_text = match &stress_snapshot.result {
+                                None if stress_snapshot.running => "Running…".to_string(),
+                                None => "Not run yet".to_string(),
+                                Some(Ok(s)) => format!("PASS\n{s}"),
+                                Some(Err(e)) => format!("FAIL\n{e}"),
+                            };
+                            let stress_ok = matches!(&stress_snapshot.result, Some(Ok(_)));
+
+                            Frame::default()
+                                .fill(Color32::from_rgb(14, 15, 17))
+                                .stroke(Stroke::new(
+                                    1.0,
+                                    if stress_ok {
+                                        Color32::from_rgb(165, 85, 85)
+                                    } else {
+                                        Color32::from_rgb(55, 58, 64)
+                                    },
+                                ))
+                                .rounding(Rounding::same(6.0))
+                                .inner_margin(Margin::same(10.0))
+                                .show(ui, |ui| {
+                                    ui.label(
+                                        RichText::new(stress_text)
+                                            .monospace()
+                                            .size(10.5)
+                                            .color(if stress_ok {
+                                                Color32::from_rgb(235, 175, 175)
+                                            } else {
+                                                Color32::from_rgb(195, 198, 205)
+                                            }),
+                                    );
+                                });
                         }
 
                         ui.add_space(8.0);
@@ -962,15 +1026,19 @@ fn run_live_qemu_test_inner(
 
     let r = result?;
     Ok(format!(
-        "Resolution: {}×{}\nStride: {} bytes\nFrames written: {}\nFrames observed: {}\nDirty notifications: {}\nElapsed: {} ms\nObserved FPS: {:.1}\nQEMU console: VALID\nLive preview: READY",
+        "Resolution: {}×{}\nStride: {} bytes\nFrames written: {}\nFrames observed: {}\nDirty notifications: {}\nDropped generations: {}\nElapsed: {} ms\nObserved FPS: {:.1}\nFrame interval avg/min/max: {:.2}/{:.2}/{:.2} ms\nQEMU console: VALID\nLive preview: READY",
         r.width,
         r.height,
         r.stride,
         r.frames_written,
         r.frames_observed,
         r.dirty_notifications,
+        r.dropped_generations,
         r.duration_ms,
-        r.observed_fps
+        r.observed_fps,
+        r.avg_frame_interval_ms,
+        r.min_frame_interval_ms,
+        r.max_frame_interval_ms
     ))
 }
 
@@ -983,6 +1051,144 @@ fn run_live_qemu_test(
     let mut state = test.lock().unwrap();
     state.running = false;
     state.result = Some(Ok("Live QEMU display test is Windows-only".to_string()));
+    drop(state);
+    ctx.request_repaint();
+}
+
+
+#[cfg(windows)]
+fn run_qemu_stress_test(test: Arc<Mutex<TestState>>, ctx: Context) {
+    {
+        let mut state = test.lock().unwrap();
+        state.running = true;
+        state.result = None;
+    }
+
+    std::thread::Builder::new()
+        .name("cdj3k-qemu-stress-test".into())
+        .spawn(move || {
+            let result = run_qemu_stress_test_inner();
+            {
+                let mut state = test.lock().unwrap();
+                state.running = false;
+                state.result = Some(result);
+            }
+            ctx.request_repaint();
+        })
+        .ok();
+}
+
+#[cfg(windows)]
+fn run_qemu_stress_test_inner() -> Result<String, String> {
+    use std::process::{Command, Stdio};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    let qemu = cdj3k_emu_runtime::external_qemu_exe()
+        .ok_or_else(|| "bundled qemu-system-aarch64.exe not found".to_string())?;
+
+    let mut cycle_lines = Vec::new();
+    let overall = Instant::now();
+
+    for cycle in 1..=5 {
+        let dir = std::env::temp_dir().join(format!("cdj3k-emu-stress-{cycle}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| format!("cycle {cycle}: create {}: {e}", dir.display()))?;
+
+        let shm = dir.join("main.shm");
+        let log = dir.join("qemu.log");
+        let stdout_file = std::fs::File::create(&log)
+            .map_err(|e| format!("cycle {cycle}: create log: {e}"))?;
+        let stderr_file = stdout_file
+            .try_clone()
+            .map_err(|e| format!("cycle {cycle}: clone log: {e}"))?;
+
+        let display_arg = format!("shm,path={}", shm.display());
+        let started = Instant::now();
+        let mut child = Command::new(&qemu)
+            .args([
+                "-machine", "virt",
+                "-accel", "tcg",
+                "-cpu", "cortex-a72",
+                "-m", "128",
+                "-nodefaults",
+                "-device", "virtio-gpu-pci",
+                "-display", &display_arg,
+                "-monitor", "none",
+                "-serial", "none",
+                "-S",
+            ])
+            .stdout(Stdio::from(stdout_file))
+            .stderr(Stdio::from(stderr_file))
+            .spawn()
+            .map_err(|e| format!("cycle {cycle}: spawn QEMU: {e}"))?;
+
+        thread::sleep(Duration::from_millis(900));
+
+        if let Ok(Some(status)) = child.try_wait() {
+            let qemu_log = std::fs::read_to_string(&log).unwrap_or_default();
+            return Err(format!(
+                "cycle {cycle}: QEMU exited early with {status}\n{qemu_log}"
+            ));
+        }
+
+        if !shm.is_file() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("cycle {cycle}: main.shm was not created"));
+        }
+
+        let qemu_log = std::fs::read_to_string(&log).unwrap_or_default();
+        if qemu_log.contains("no graphic console found") || qemu_log.contains("console -1") {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!(
+                "cycle {cycle}: invalid graphical console\n{qemu_log}"
+            ));
+        }
+
+        child.kill()
+            .map_err(|e| format!("cycle {cycle}: kill QEMU: {e}"))?;
+        let status = child.wait()
+            .map_err(|e| format!("cycle {cycle}: wait QEMU: {e}"))?;
+
+        thread::sleep(Duration::from_millis(120));
+
+        match child.try_wait() {
+            Ok(Some(_)) => {}
+            Ok(None) => return Err(format!("cycle {cycle}: QEMU process remained alive")),
+            Err(e) => return Err(format!("cycle {cycle}: process status check failed: {e}")),
+        }
+
+        let elapsed = started.elapsed().as_millis();
+        cycle_lines.push(format!(
+            "Cycle {cycle}: PASS ({} ms, exit {})",
+            elapsed,
+            status.code().map(|x| x.to_string()).unwrap_or_else(|| "terminated".into())
+        ));
+
+        // Remove test runtime directory to validate cleanup is possible.
+        std::fs::remove_dir_all(&dir)
+            .map_err(|e| format!("cycle {cycle}: cleanup {}: {e}", dir.display()))?;
+        if dir.exists() {
+            return Err(format!("cycle {cycle}: runtime directory still exists after cleanup"));
+        }
+    }
+
+    let total_ms = overall.elapsed().as_millis();
+    cycle_lines.push(format!("All 5 cycles passed in {total_ms} ms"));
+    cycle_lines.push("No orphan child process detected by owned process handles".to_string());
+    cycle_lines.push("Runtime directories cleaned successfully".to_string());
+
+    Ok(cycle_lines.join("\n"))
+}
+
+#[cfg(not(windows))]
+fn run_qemu_stress_test(test: Arc<Mutex<TestState>>, ctx: Context) {
+    let mut state = test.lock().unwrap();
+    state.running = false;
+    state.result = Some(Ok("QEMU stress test is Windows-only".to_string()));
     drop(state);
     ctx.request_repaint();
 }

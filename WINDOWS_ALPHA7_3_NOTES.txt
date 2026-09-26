@@ -1,0 +1,28 @@
+CDJ3K-EMU Windows Alpha 7.3 - Performance + robustness diagnostics
+
+Builds on the passing Alpha 7.2 live QEMU shared-memory test.
+
+Live QEMU Test now reports:
+- frames written
+- frames observed
+- dirty notifications
+- dropped generations
+- observed FPS
+- frame interval average/minimum/maximum in milliseconds
+
+Adds:
+  Run 5-Cycle Stress Test
+
+The stress test:
+- launches real bundled QEMU 5 times
+- creates a virtio-gpu graphical console each cycle
+- verifies main.shm is created
+- rejects console -1 / no graphical console
+- terminates QEMU each cycle
+- waits for process exit
+- removes each runtime directory
+- reports per-cycle timing
+- fails immediately on a startup, console, shutdown, or cleanup problem
+
+This is a no-key host robustness test. No CDJ firmware decryption is performed
+and no Pioneer/AlphaTheta AES key is included, generated, derived, or bypassed.
