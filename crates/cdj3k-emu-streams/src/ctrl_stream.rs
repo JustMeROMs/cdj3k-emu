@@ -169,13 +169,9 @@ fn stream_loop(
                 // Before firmware is provisioned/QEMU starts, refusal is
                 // expected. Keep one useful diagnostic, then rate-limit to
                 // roughly once every five minutes.
-                if failed_attempts == 1 || failed_attempts.is_multiple_of(150) {
-                    eprintln!(
-                        "[ctrl] waiting for QEMU control channel {}: {} (attempt {failed_attempts})",
-                        sock_path.display(),
-                        e
-                    );
-                }
+                // Connection refusal is expected while QEMU is not running.
+                // Poll silently; a real connect/disconnect is still logged.
+                let _ = &e;
                 thread::sleep(RECONNECT_DELAY);
             }
         }

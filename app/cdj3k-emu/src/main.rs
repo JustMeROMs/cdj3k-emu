@@ -49,6 +49,19 @@ fn configure_helvetica_medium(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
+#[cfg(windows)]
+fn write_windows_runtime_state(socket_dir: &str, state: &str) {
+    let dir = std::path::PathBuf::from(socket_dir);
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("runtime-state.txt");
+    if let Err(e) = std::fs::write(&path, format!("{state}\r\n")) {
+        eprintln!(
+            "cdj3k-emu: warning: could not write runtime state {}: {e}",
+            path.display()
+        );
+    }
+}
+
 fn main() {
     #[cfg(windows)]
     {
@@ -214,6 +227,7 @@ fn main() {
 
         // Reuse the runtime crate's shutdown cleanup path on Windows as well.
         let _ = cdj3k_emu_runtime::SHUTDOWN_SOCK_DIR.set(runtime_dir);
+        write_windows_runtime_state(&socket_dir, "CHECKING_RUNTIME");
     }
 
     // ── QEMU lifecycle ────────────────────────────────────────────────────
@@ -435,21 +449,26 @@ fn main() {
         };
         let can_boot = resolved_kernel.exists() && resolved_initramfs.exists() && (no_emmc || emmc_path.exists());
         if can_boot {
+            write_windows_runtime_state(&socket_dir, "STARTING_QEMU");
             match QemuInstance::spawn(config.clone()) {
-                Ok(inst) => runtime_worker::spawn(Some(inst), config, prebuilt_net),
+                Ok(inst) => {
+                    eprintln!("cdj3k-emu: Windows QEMU started");
+                    write_windows_runtime_state(&socket_dir, "QEMU_RUNNING");
+                    runtime_worker::spawn(Some(inst), config, prebuilt_net);
+                }
                 Err(e) => {
                     eprintln!("cdj3k-emu: Windows QEMU start failed: {e:?}");
+                    write_windows_runtime_state(&socket_dir, "QEMU_START_FAILED");
                     runtime_worker::spawn(None, config, prebuilt_net);
                 }
             }
         } else {
-            eprintln!("cdj3k-emu: firmware is not provisioned for Slot {instance}.");
-            eprintln!("cdj3k-emu: waiting for firmware installation - QEMU will NOT be started yet.");
-            eprintln!("cdj3k-emu: expected kernel: {}", resolved_kernel.display());
-            eprintln!("cdj3k-emu: expected initramfs: {}", resolved_initramfs.display());
-            if !no_emmc {
-                eprintln!("cdj3k-emu: expected eMMC image: {}", emmc_path.display());
-            }
+            // Firmware-version agnostic: any compatible package can eventually
+            // provision these files. Do not assume a specific .UPD version.
+            eprintln!(
+                "cdj3k-emu: firmware not provisioned for Slot {instance}; waiting for Install Firmware"
+            );
+            write_windows_runtime_state(&socket_dir, "WAITING_FOR_FIRMWARE");
             cdj3k_emu_platform::menu_state::lock().firmware_wizard_requested = true;
             runtime_worker::spawn(None, config, prebuilt_net);
         }
@@ -521,8 +540,12 @@ fn main() {
     // transport files so the next launch starts clean.
     #[cfg(windows)]
     {
+        write_windows_runtime_state(&socket_dir, "STOPPING");
         cdj3k_emu_runtime::kill_qemu_child_now();
         cdj3k_emu_runtime::cleanup_runtime_files();
+        let _ = std::fs::remove_file(
+            std::path::PathBuf::from(&socket_dir).join("runtime-state.txt")
+        );
         eprintln!("cdj3k-emu: Windows runtime cleanup complete");
     }
 

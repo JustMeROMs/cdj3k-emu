@@ -144,9 +144,9 @@ fn open_shm(shm_path: &str) -> Mmap {
                 // Missing firmware / QEMU-not-started is a normal state. Log
                 // immediately once, then only every five minutes instead of
                 // flooding the Windows console every ten seconds.
-                if log_attempts == 1 || log_attempts % 300 == 0 {
-                    eprintln!("[jog_stream] waiting for QEMU jog buffer {shm_path}: {e} (attempt {log_attempts})");
-                }
+                // Missing jog.shm is an expected idle/pre-firmware state.
+                // Keep polling silently; diagnostics exposes readiness.
+                let _ = (&e, log_attempts);
             }
         }
         thread::sleep(Duration::from_secs(1));

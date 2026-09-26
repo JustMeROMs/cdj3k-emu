@@ -1,0 +1,31 @@
+CDJ3K-EMU Windows Alpha 7.5 - Runtime state + quiet idle mode
+
+Firmware handling is deliberately version-agnostic.
+The app does not assume firmware 3.20; any compatible firmware package can
+eventually provision the required kernel/initramfs/eMMC files.
+
+Changes
+-------
+- Adds per-instance runtime-state.txt with states:
+    CHECKING_RUNTIME
+    WAITING_FOR_FIRMWARE
+    STARTING_QEMU
+    QEMU_RUNNING
+    QEMU_START_FAILED
+    STOPPING
+- System Diagnostics now shows a Runtime state row.
+- Replaces version-specific wording with:
+    WAITING FOR COMPATIBLE FIRMWARE
+- Main LCD, jog LCD and control-channel background threads keep polling but
+  remain quiet while QEMU/firmware is absent.
+- Real stream connect/disconnect events are still logged.
+- Runtime-state marker is removed during normal Windows shutdown.
+- Keeps Alpha 7.4 stale-file cleanup and process cleanup behavior.
+
+Goal
+----
+A clean Windows idle state when firmware has not yet been provisioned:
+no repetitive missing-shm/control-channel console spam, clear diagnostics state,
+and a clean transition to QEMU startup once compatible firmware is available.
+
+No firmware AES key is included, generated, derived or bypassed.

@@ -561,9 +561,38 @@ fn status_row(ui: &mut egui::Ui, ok: bool, name: &str, detail: &str) {
     });
 }
 
+#[cfg(windows)]
+fn current_runtime_state() -> (bool, String) {
+    let instance = cdj3k_emu_platform::menu_state::lock().current_instance_id;
+    let dir = cdj3k_emu_platform::runtime_paths::instance_dir(instance);
+    let path = dir.join("runtime-state.txt");
+
+    match std::fs::read_to_string(&path) {
+        Ok(raw) => {
+            let state = raw.trim();
+            let good = matches!(state, "QEMU_RUNNING" | "STARTING_QEMU" | "CHECKING_RUNTIME");
+            let display = match state {
+                "WAITING_FOR_FIRMWARE" => "WAITING FOR COMPATIBLE FIRMWARE",
+                "CHECKING_RUNTIME" => "CHECKING RUNTIME",
+                "STARTING_QEMU" => "STARTING QEMU",
+                "QEMU_RUNNING" => "QEMU RUNNING",
+                "QEMU_START_FAILED" => "QEMU START FAILED",
+                "STOPPING" => "STOPPING",
+                other if !other.is_empty() => other,
+                _ => "IDLE",
+            };
+            (good, display.to_string())
+        }
+        Err(_) => (false, "IDLE / FIRMWARE NOT PROVISIONED".to_string()),
+    }
+}
+
 fn draw_static_checks(ui: &mut egui::Ui) {
     #[cfg(windows)]
     {
+        let (runtime_ok, runtime_state) = current_runtime_state();
+        status_row(ui, runtime_ok, "Runtime state", &runtime_state);
+
         let qemu = cdj3k_emu_runtime::external_qemu_exe();
         match qemu {
             Some(p) => status_row(ui, true, "QEMU", &p.display().to_string()),

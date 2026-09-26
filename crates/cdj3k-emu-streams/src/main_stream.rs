@@ -135,10 +135,10 @@ fn shm_loop(
                     break m;
                 }
                 None => {
-                    if !wait_logged {
-                        eprintln!("[main_stream] waiting for {shm_path}");
-                        wait_logged = true;
-                    }
+                    // Missing main.shm is normal while no firmware is provisioned
+                    // or QEMU is stopped. Avoid console noise; connection state is
+                    // surfaced in the diagnostics UI instead.
+                    wait_logged = true;
                     thread::sleep(RECONNECT_DELAY);
                 }
             }
