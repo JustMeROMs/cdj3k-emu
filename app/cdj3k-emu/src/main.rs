@@ -507,6 +507,10 @@ fn run_windows_host_test() -> Result<(), String> {
         "-cpu".to_string(), "cortex-a72".to_string(),
         "-m".to_string(), "128".to_string(),
         "-nodefaults".to_string(),
+        // Alpha 7.0: create a real QEMU graphical console.  Without a display
+        // device the custom shm backend exists but reports "console -1" and
+        // cannot capture an actual QEMU surface.
+        "-device".to_string(), "virtio-gpu-pci".to_string(),
         "-display".to_string(), format!("shm,path={}", shm.display()),
         "-monitor".to_string(), "none".to_string(),
         "-serial".to_string(), "none".to_string(),
@@ -564,7 +568,35 @@ fn run_windows_host_test() -> Result<(), String> {
 
     let meta = std::fs::metadata(&shm)
         .map_err(|e| format!("stat {}: {e}", shm.display()))?;
+    if meta.len() <= 64 {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(format!(
+            "main.shm exists but is too small to contain a framebuffer: {} bytes",
+            meta.len()
+        ));
+    }
+
+    // QEMU's shm-display backend logs whether it found a real graphical
+    // console. Alpha 6.x only proved the file could be created; Alpha 7.0
+    // explicitly rejects console -1 / no-console operation.
+    let qemu_log = std::fs::read_to_string(&log).unwrap_or_default();
+    let bad_console = qemu_log.contains("no graphic console found")
+        || qemu_log.contains("console -1");
+    if bad_console {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(format!(
+            "QEMU shm backend started without a real graphical console.\nQEMU log:\n{}",
+            qemu_log.trim()
+        ));
+    }
+
     println!("cdj3k-emu host-test: main.shm created ({} bytes)", meta.len());
+    println!("cdj3k-emu host-test: QEMU graphical console detected");
+    if !qemu_log.trim().is_empty() {
+        println!("cdj3k-emu host-test: qemu display log: {}", qemu_log.trim());
+    }
 
     child.kill()
         .map_err(|e| format!("terminate QEMU test process: {e}"))?;

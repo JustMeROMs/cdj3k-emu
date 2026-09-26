@@ -466,10 +466,10 @@ jobs:
           
           @'
           @echo off
-          title CDJ3K Emulator Alpha 6.6 App-to-QEMU Integration Test
+          title CDJ3K Emulator Alpha 7.0 App-to-QEMU Integration Test
           cd /d "%~dp0"
           echo ============================================================
-          echo CDJ3K Emulator Alpha 6.6 - APP TO QEMU TEST
+          echo CDJ3K Emulator Alpha 7.0 - APP TO QEMU GRAPHICS TEST
           echo ============================================================
           echo.
           echo No Pioneer firmware or AES key is required.
@@ -488,11 +488,11 @@ jobs:
           exit /b %RC%
           '@ | Set-Content -Encoding ASCII dist/APP-QEMU-SELFTEST.bat
 
-          Write-Host "Final Windows Alpha 6.6 package:"
+          Write-Host "Final Windows Alpha 7.0 package:"
           Get-ChildItem -Recurse dist | Select-Object FullName,Length
 
       - uses: actions/upload-artifact@v4
         with:
-          name: cdj3k-emu-windows-alpha6.6
+          name: cdj3k-emu-windows-alpha7.0
           path: dist/
           retention-days: 14

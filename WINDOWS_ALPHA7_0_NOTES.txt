@@ -1,0 +1,41 @@
+CDJ3K-EMU Windows Alpha 7.0 - Real QEMU graphical-console validation
+
+Why this build exists
+---------------------
+Alpha 6.6 proved the Rust app could launch QEMU and that the custom shm display
+backend could create main.shm.  The uploaded QEMU log then showed:
+
+  shm-display: no graphic console found; framebuffer will not be captured
+  shm-display: ... (console -1)
+
+So Alpha 7.0 upgrades the no-key host test from "shm file exists" to
+"QEMU actually has a real graphical console feeding the shm backend".
+
+Changes
+-------
+- The Windows host test now adds:
+    -device virtio-gpu-pci
+  to the minimal ARM64 virt machine.
+- The test still uses:
+    -display shm,path=...
+- The app now FAILS the host test if QEMU logs either:
+    no graphic console found
+    console -1
+- main.shm must exist and be larger than the header-only size.
+- PASS output now includes:
+    QEMU graphical console detected
+
+Expected no-key test
+--------------------
+Run APP-QEMU-SELFTEST.bat or use System Diagnostics -> Run Host Test.
+
+Expected PASS path:
+  bundled QEMU found
+  minimal ARM64 TCG VM starts
+  virtio-gpu-pci creates a graphical console
+  shm backend attaches to that console
+  main.shm is created with framebuffer storage
+  QEMU process stops cleanly
+
+No Pioneer/AlphaTheta firmware or AES/decryption key is required.
+This build does not bypass or derive firmware encryption.
