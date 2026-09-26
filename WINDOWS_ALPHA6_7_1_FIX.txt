@@ -1,0 +1,17 @@
+CDJ3K-EMU Windows Alpha 6.7.1
+
+Fixes Rust compiler error E0382 in diagnostics.rs:
+
+  use of partially moved value
+
+Cause:
+The diagnostics result match moved the String out of Some(Err(e)) / Some(Ok(s)),
+then the code tried to inspect state_snapshot.result again.
+
+Fix:
+Match the result by reference:
+  match &state_snapshot.result
+and also inspect it by reference:
+  matches!(&state_snapshot.result, Some(Ok(_)))
+
+No QEMU, guest, firmware, or provisioning changes in this patch.

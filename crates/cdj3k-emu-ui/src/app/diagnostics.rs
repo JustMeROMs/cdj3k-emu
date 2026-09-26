@@ -123,14 +123,14 @@ impl DiagnosticsWindow {
                         );
                         ui.add_space(4.0);
 
-                        let result_text = match state_snapshot.result {
+                        let result_text = match &state_snapshot.result {
                             None if state_snapshot.running => "Running…".to_string(),
                             None => "Not run yet".to_string(),
                             Some(Ok(s)) => format!("PASS\n{s}"),
                             Some(Err(e)) => format!("FAIL\n{e}"),
                         };
 
-                        let ok = matches!(state_snapshot.result, Some(Ok(_)));
+                        let ok = matches!(&state_snapshot.result, Some(Ok(_)));
                         Frame::default()
                             .fill(Color32::from_rgb(14, 15, 17))
                             .stroke(Stroke::new(
