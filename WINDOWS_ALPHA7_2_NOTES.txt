@@ -1,0 +1,25 @@
+CDJ3K-EMU Windows Alpha 7.2 - Live real-QEMU shared-memory animation test
+
+Adds a new System Diagnostics button:
+  Run Live QEMU Test
+
+What it validates without CDJ firmware or an AES key:
+- launches the real bundled Windows QEMU
+- creates a real virtio-gpu graphical console
+- attaches the custom shm display backend
+- uses the real QEMU-created main.shm file
+- connects the normal MainLcdStream reader
+- writes a moving high-contrast test overlay into the QEMU-owned framebuffer
+  mapping while QEMU remains running
+- updates the generation counter and dirty rectangle metadata at ~30 FPS
+- verifies MainLcdStream observes the live generations
+- updates the egui preview roughly 10 times per second during the test
+- reports frames written, frames observed, dirty notifications and observed FPS
+
+Important:
+Because proprietary CDJ firmware is not available, the moving pixels are injected
+by the diagnostics code into QEMU's real framebuffer mapping rather than drawn by
+a guest OS. This still validates the live end-to-end transport:
+QEMU-owned main.shm -> MainLcdStream -> repaint -> egui texture preview.
+
+No Pioneer/AlphaTheta firmware key is included, generated, derived, or bypassed.

@@ -588,3 +588,206 @@ pub fn inspect_qemu_main_shm(
         preview_rgba,
     })
 }
+
+
+/// Result of the live real-QEMU shared-memory animation diagnostic.
+#[derive(Debug, Clone)]
+pub struct LiveQemuDisplayResult {
+    pub width: u32,
+    pub height: u32,
+    pub stride: u32,
+    pub frames_written: u32,
+    pub frames_observed: u32,
+    pub dirty_notifications: u32,
+    pub duration_ms: u128,
+    pub observed_fps: f64,
+    pub final_rgba: Vec<u8>,
+}
+
+/// Exercise a live, continuously changing framebuffer using the *real*
+/// QEMU-created main.shm file and the normal MainLcdStream reader.
+///
+/// QEMU owns/creates the shared-memory surface and provides a valid graphics
+/// console. Because no proprietary guest firmware is available to draw pixels,
+/// this diagnostic writes a moving test overlay directly into that QEMU-owned
+/// framebuffer mapping. This validates live end-to-end updates through the
+/// exact shared-memory file and stream reader used by the emulator.
+#[cfg(windows)]
+pub fn run_live_qemu_shm_animation<F>(
+    ctx: egui::Context,
+    sock_dir: &std::path::Path,
+    frames: u32,
+    mut on_frame: F,
+) -> Result<LiveQemuDisplayResult, String>
+where
+    F: FnMut(u32, u32, Vec<u8>),
+{
+    use memmap2::MmapMut;
+    use std::fs::OpenOptions;
+    use std::sync::atomic::{AtomicU32 as StdAtomicU32, Ordering as StdOrdering};
+    use std::time::Instant;
+
+    let path = sock_dir.join("main.shm");
+    let deadline = Instant::now() + Duration::from_secs(4);
+    while !path.is_file() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(25));
+    }
+    if !path.is_file() {
+        return Err(format!("QEMU main.shm not found: {}", path.display()));
+    }
+
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .map_err(|e| format!("open {} read/write: {e}", path.display()))?;
+    let mut mmap = unsafe { MmapMut::map_mut(&file) }
+        .map_err(|e| format!("mmap {}: {e}", path.display()))?;
+
+    if mmap.len() < SHM_PIXELS_OFFSET {
+        return Err(format!("main.shm too small: {} bytes", mmap.len()));
+    }
+
+    fn get_u32(buf: &[u8], off: usize) -> u32 {
+        u32::from_le_bytes(buf[off..off + 4].try_into().unwrap())
+    }
+    fn put_u32(buf: &mut [u8], off: usize, v: u32) {
+        buf[off..off + 4].copy_from_slice(&v.to_le_bytes());
+    }
+
+    let magic = get_u32(&mmap, 0);
+    if magic != SHM_MAGIC {
+        return Err(format!(
+            "unexpected shm magic 0x{magic:08x}, expected 0x{SHM_MAGIC:08x}"
+        ));
+    }
+
+    let width = get_u32(&mmap, 8);
+    let height = get_u32(&mmap, 12);
+    let stride = get_u32(&mmap, 16);
+    if width == 0 || height == 0 || stride < width.saturating_mul(4) {
+        return Err(format!(
+            "invalid QEMU framebuffer geometry: {width}x{height}, stride {stride}"
+        ));
+    }
+
+    let required = SHM_PIXELS_OFFSET + stride as usize * height as usize;
+    if required > mmap.len() {
+        return Err(format!(
+            "QEMU main.shm truncated: need {required} bytes, have {}",
+            mmap.len()
+        ));
+    }
+
+    let gate = crate::RepaintGate::new_60fps(ctx);
+    let stream = MainLcdStream::new(&sock_dir.to_string_lossy(), gate);
+
+    let connect_deadline = Instant::now() + Duration::from_secs(3);
+    while !stream.is_connected() && Instant::now() < connect_deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+    if !stream.is_connected() {
+        return Err("MainLcdStream did not connect to QEMU main.shm".to_string());
+    }
+
+    let start = Instant::now();
+    let mut dirty_notifications = 0u32;
+    let base_generation = get_u32(&mmap, 4);
+
+    // Draw a moving high-contrast bar at ~30 FPS for a few seconds.
+    for frame in 0..frames {
+        let bar_w = (width / 6).max(24);
+        let x0 = if width > bar_w {
+            (frame * 17) % (width - bar_w)
+        } else {
+            0
+        };
+        let y0 = height / 3;
+        let bar_h = (height / 3).max(24).min(height.saturating_sub(y0));
+
+        // Dim the full framebuffer slightly so motion is visually obvious.
+        for y in 0..height as usize {
+            let row = SHM_PIXELS_OFFSET + y * stride as usize;
+            for x in 0..width as usize {
+                let off = row + x * 4;
+                mmap[off] = ((x as u32 * 255 / width.max(1)) as u8) / 3;
+                mmap[off + 1] = ((y as u32 * 255 / height.max(1)) as u8) / 3;
+                mmap[off + 2] = 24;
+                mmap[off + 3] = 255;
+            }
+        }
+
+        for y in y0..y0 + bar_h {
+            let row = SHM_PIXELS_OFFSET + y as usize * stride as usize;
+            for x in x0..x0 + bar_w {
+                let off = row + x as usize * 4;
+                mmap[off] = (frame.wrapping_mul(9) & 0xff) as u8;
+                mmap[off + 1] = 220;
+                mmap[off + 2] = (255u32.wrapping_sub(frame * 5) & 0xff) as u8;
+                mmap[off + 3] = 255;
+            }
+        }
+
+        put_u32(&mut mmap, 24, 0);
+        put_u32(&mut mmap, 28, 0);
+        put_u32(&mut mmap, 32, width);
+        put_u32(&mut mmap, 36, height);
+
+        let gen = base_generation.wrapping_add(frame).wrapping_add(1);
+        let gen_ptr = unsafe { mmap.as_mut_ptr().add(4) as *mut StdAtomicU32 };
+        unsafe { (&*gen_ptr).store(gen, StdOrdering::Release) };
+
+        if let Some(_) = stream.take() {
+            dirty_notifications += 1;
+        }
+
+        // Push a UI preview roughly every 3 frames (~10 FPS) so the diagnostics
+        // window visibly animates without copying a full framebuffer at 30 FPS.
+        if frame % 3 == 0 {
+            let mut packed = vec![0u8; width as usize * height as usize * 4];
+            for y in 0..height as usize {
+                let src = SHM_PIXELS_OFFSET + y * stride as usize;
+                let dst = y * width as usize * 4;
+                packed[dst..dst + width as usize * 4]
+                    .copy_from_slice(&mmap[src..src + width as usize * 4]);
+            }
+            on_frame(width, height, packed);
+        }
+
+        thread::sleep(Duration::from_millis(33));
+    }
+
+    thread::sleep(Duration::from_millis(120));
+    while let Some(_) = stream.take() {
+        dirty_notifications += 1;
+    }
+
+    let elapsed = start.elapsed();
+    let frames_observed = stream.frames_seen();
+    if frames_observed < frames / 2 {
+        return Err(format!(
+            "MainLcdStream observed too few live QEMU shm generations: {frames_observed}/{frames}"
+        ));
+    }
+
+    let mut final_rgba = vec![0u8; width as usize * height as usize * 4];
+    for y in 0..height as usize {
+        let src = SHM_PIXELS_OFFSET + y * stride as usize;
+        let dst = y * width as usize * 4;
+        final_rgba[dst..dst + width as usize * 4]
+            .copy_from_slice(&mmap[src..src + width as usize * 4]);
+    }
+
+    let secs = elapsed.as_secs_f64().max(0.001);
+    Ok(LiveQemuDisplayResult {
+        width,
+        height,
+        stride,
+        frames_written: frames,
+        frames_observed,
+        dirty_notifications,
+        duration_ms: elapsed.as_millis(),
+        observed_fps: frames_observed as f64 / secs,
+        final_rgba,
+    })
+}
