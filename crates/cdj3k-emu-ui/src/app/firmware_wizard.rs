@@ -10,6 +10,8 @@ use egui::{
 
 use cdj3k_emu_platform::{desktop::open_file_picker, menu_state};
 
+use super::diagnostics::DiagnosticsWindow;
+
 // ── Provision step ────────────────────────────────────────────────────────────
 
 #[derive(Clone, Debug)]
@@ -59,6 +61,7 @@ pub struct FirmwareWizard {
     /// wizard is shown; the main window keeps stealing focus on macOS until we
     /// explicitly raise the wizard.
     focused_after_open: bool,
+    diagnostics: DiagnosticsWindow,
 }
 
 impl FirmwareWizard {
@@ -72,10 +75,13 @@ impl FirmwareWizard {
             provision_status: None,
             terminal: None,
             focused_after_open: false,
+            diagnostics: DiagnosticsWindow::new(),
         }
     }
 
     pub fn show(&mut self, ctx: &Context) {
+        self.diagnostics.show(ctx);
+
         if !self.open {
             self.focused_after_open = false;
             return;
@@ -329,6 +335,25 @@ impl FirmwareWizard {
                     }
                 }
             }
+        });
+
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            let diagnostics = Button::new(
+                RichText::new("System Diagnostics…")
+                    .size(12.0)
+                    .strong()
+                    .color(Color32::from_rgb(210, 220, 230)),
+            )
+            .fill(Color32::from_rgb(45, 50, 58));
+            if ui.add_sized([160.0, 28.0], diagnostics).clicked() {
+                self.diagnostics.open = true;
+            }
+            ui.label(
+                RichText::new("No firmware or AES key required")
+                    .size(10.5)
+                    .color(Color32::from_rgb(125, 150, 135)),
+            );
         });
     }
 

@@ -1,6 +1,7 @@
 mod bloom;
 mod boot_overlay;
 mod buttons;
+mod diagnostics;
 mod firmware_wizard;
 mod frame_inject;
 mod jog_physics;

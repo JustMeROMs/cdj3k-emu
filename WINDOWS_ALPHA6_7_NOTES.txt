@@ -1,0 +1,21 @@
+CDJ3K-EMU Windows Alpha 6.7 - Built-in System Diagnostics
+
+Adds a built-in Diagnostics window accessible from the Firmware Wizard.
+
+Features:
+- System Diagnostics button in the Firmware Wizard
+- QEMU detected status + path
+- guest kernel status
+- bundled provisioning-tool status
+- qemu-img status
+- Windows runtime/log-folder path
+- Run Host Test button
+- host test executes:
+    cdj3k-emu.exe --windows-host-test
+  in a background thread and displays PASS/FAIL output in the UI
+- Open Logs Folder button opens:
+    %TEMP%\cdj3k-emu-hosttest
+
+No Pioneer firmware or AES key is required for these diagnostics.
+Actual firmware provisioning still requires a legitimately obtained compatible
+decryption key.
