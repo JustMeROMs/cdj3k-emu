@@ -487,3 +487,104 @@ pub fn run_synthetic_display_test(ctx: egui::Context) -> Result<SyntheticDisplay
         preview_rgba,
     })
 }
+
+
+#[derive(Debug, Clone)]
+pub struct QemuShmIntegrationResult {
+    pub connected: bool,
+    pub width: u32,
+    pub height: u32,
+    pub stride: u32,
+    pub generation: u32,
+    pub shm_bytes: u64,
+    pub preview_rgba: Vec<u8>,
+}
+
+#[cfg(windows)]
+pub fn inspect_qemu_main_shm(
+    ctx: egui::Context,
+    sock_dir: &std::path::Path,
+) -> Result<QemuShmIntegrationResult, String> {
+    use memmap2::MmapOptions;
+    use std::fs::OpenOptions;
+    use std::time::Instant;
+
+    let gate = crate::RepaintGate::new_60fps(ctx);
+    let stream = MainLcdStream::new(&sock_dir.to_string_lossy(), gate);
+
+    let deadline = Instant::now() + Duration::from_secs(4);
+    while !stream.is_connected() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(25));
+    }
+    if !stream.is_connected() {
+        return Err(format!(
+            "MainLcdStream did not connect to {}",
+            sock_dir.join("main.shm").display()
+        ));
+    }
+
+    let path = sock_dir.join("main.shm");
+    let file = OpenOptions::new()
+        .read(true)
+        .open(&path)
+        .map_err(|e| format!("open {}: {e}", path.display()))?;
+    let meta = file.metadata()
+        .map_err(|e| format!("stat {}: {e}", path.display()))?;
+    let mmap = unsafe { MmapOptions::new().map(&file) }
+        .map_err(|e| format!("mmap {}: {e}", path.display()))?;
+
+    if mmap.len() < SHM_PIXELS_OFFSET {
+        return Err(format!("main.shm too small: {} bytes", mmap.len()));
+    }
+
+    fn get_u32(buf: &[u8], off: usize) -> u32 {
+        u32::from_le_bytes(buf[off..off + 4].try_into().unwrap())
+    }
+
+    let magic = get_u32(&mmap, 0);
+    if magic != SHM_MAGIC {
+        return Err(format!(
+            "unexpected shm magic 0x{magic:08x}, expected 0x{SHM_MAGIC:08x}"
+        ));
+    }
+
+    let generation = get_u32(&mmap, 4);
+    let width = get_u32(&mmap, 8);
+    let height = get_u32(&mmap, 12);
+    let stride = get_u32(&mmap, 16);
+
+    if width == 0 || height == 0 || stride < width.saturating_mul(4) {
+        return Err(format!(
+            "invalid QEMU framebuffer geometry: {width}x{height}, stride {stride}"
+        ));
+    }
+
+    let pixel_bytes = stride as usize * height as usize;
+    let end = SHM_PIXELS_OFFSET
+        .checked_add(pixel_bytes)
+        .ok_or_else(|| "framebuffer size overflow".to_string())?;
+    if end > mmap.len() {
+        return Err(format!(
+            "main.shm truncated: need {end} bytes, have {}",
+            mmap.len()
+        ));
+    }
+
+    let mut preview_rgba = vec![0u8; width as usize * height as usize * 4];
+    for y in 0..height as usize {
+        let src = SHM_PIXELS_OFFSET + y * stride as usize;
+        let dst = y * width as usize * 4;
+        preview_rgba[dst..dst + width as usize * 4]
+            .copy_from_slice(&mmap[src..src + width as usize * 4]);
+    }
+
+    Ok(QemuShmIntegrationResult {
+        connected: true,
+        width,
+        height,
+        stride,
+        generation,
+        shm_bytes: meta.len(),
+        preview_rgba,
+    })
+}

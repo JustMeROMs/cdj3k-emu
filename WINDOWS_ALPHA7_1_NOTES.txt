@@ -1,0 +1,29 @@
+CDJ3K-EMU Windows Alpha 7.1 - Real QEMU framebuffer into Rust/UI diagnostics
+
+Alpha 7.0 proved:
+  Rust app -> Windows QEMU -> virtio-gpu graphical console -> shm display backend
+with a valid console 0.
+
+Alpha 7.1 connects that real QEMU-created main.shm to the Rust display reader.
+
+New System Diagnostics button:
+  Run QEMU Display Test
+
+It performs, without CDJ firmware or AES key:
+1. Launch bundled qemu-system-aarch64.exe.
+2. Create an ARM64 virt machine using TCG.
+3. Add virtio-gpu-pci so QEMU has a real graphical console.
+4. Attach the custom shm display backend.
+5. Verify QEMU does not report console -1 / no graphical console.
+6. Create MainLcdStream against QEMU's runtime directory.
+7. Verify MainLcdStream connects to the QEMU-created main.shm.
+8. Parse QEMU framebuffer width / height / stride / generation.
+9. Copy the QEMU framebuffer from the shared-memory mapping.
+10. Upload it to an egui texture.
+11. Render a visible Real QEMU framebuffer preview in System Diagnostics.
+
+Expected current no-key framebuffer may be blank/default because no guest firmware
+is booted. The milestone is that the pixels come from real QEMU rather than the
+synthetic producer.
+
+No Pioneer/AlphaTheta firmware key is included, generated, or bypassed.

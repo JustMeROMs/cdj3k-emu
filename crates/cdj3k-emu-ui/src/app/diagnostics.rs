@@ -23,6 +23,8 @@ pub struct DiagnosticsWindow {
     pub open: bool,
     test: Arc<Mutex<TestState>>,
     display_test: Arc<Mutex<TestState>>,
+    qemu_display_test: Arc<Mutex<TestState>>,
+    qemu_display_preview: Arc<Mutex<Option<egui::ColorImage>>>,
     /// Captured framebuffer from the synthetic main.shm pipeline. Kept as a
     /// ColorImage so the diagnostics viewport can upload it through egui's
     /// texture manager and visibly render the same bytes the stream observed.
@@ -36,6 +38,8 @@ impl DiagnosticsWindow {
             open: false,
             test: Arc::new(Mutex::new(TestState::default())),
             display_test: Arc::new(Mutex::new(TestState::default())),
+            qemu_display_test: Arc::new(Mutex::new(TestState::default())),
+            qemu_display_preview: Arc::new(Mutex::new(None)),
             display_preview: Arc::new(Mutex::new(None)),
             focused_after_open: false,
         }
@@ -52,6 +56,8 @@ impl DiagnosticsWindow {
         let need_focus = !self.focused_after_open;
         let test = self.test.clone();
         let display_test = self.display_test.clone();
+        let qemu_display_test = self.qemu_display_test.clone();
+        let qemu_display_preview = self.qemu_display_preview.clone();
         let display_preview = self.display_preview.clone();
 
         ctx.show_viewport_immediate(
@@ -122,6 +128,96 @@ impl DiagnosticsWindow {
                                 open_logs_folder();
                             }
                         });
+
+                        ui.add_space(8.0);
+                        let qemu_display_snapshot = qemu_display_test.lock().unwrap().clone();
+                        ui.horizontal(|ui| {
+                            let run = Button::new(
+                                RichText::new(if qemu_display_snapshot.running {
+                                    "Running QEMU Display Test…"
+                                } else {
+                                    "Run QEMU Display Test"
+                                })
+                                .strong()
+                                .color(Color32::WHITE),
+                            )
+                            .fill(Color32::from_rgb(180, 105, 45));
+
+                            if ui.add_enabled(!qemu_display_snapshot.running, run).clicked() {
+                                if let Ok(mut preview) = qemu_display_preview.lock() {
+                                    *preview = None;
+                                }
+                                run_qemu_display_test(
+                                    qemu_display_test.clone(),
+                                    qemu_display_preview.clone(),
+                                    ctx.clone(),
+                                );
+                            }
+
+                            ui.label(
+                                RichText::new("Real QEMU console → main.shm → MainLcdStream")
+                                    .size(10.5)
+                                    .color(Color32::from_rgb(145, 150, 158)),
+                            );
+                        });
+
+                        if qemu_display_snapshot.running || qemu_display_snapshot.result.is_some() {
+                            ui.add_space(6.0);
+                            let text = match &qemu_display_snapshot.result {
+                                None if qemu_display_snapshot.running => "Running…".to_string(),
+                                None => "Not run yet".to_string(),
+                                Some(Ok(s)) => format!("PASS\n{s}"),
+                                Some(Err(e)) => format!("FAIL\n{e}"),
+                            };
+                            let ok = matches!(&qemu_display_snapshot.result, Some(Ok(_)));
+                            Frame::default()
+                                .fill(Color32::from_rgb(14, 15, 17))
+                                .stroke(Stroke::new(
+                                    1.0,
+                                    if ok {
+                                        Color32::from_rgb(190, 115, 55)
+                                    } else {
+                                        Color32::from_rgb(55, 58, 64)
+                                    },
+                                ))
+                                .rounding(Rounding::same(6.0))
+                                .inner_margin(Margin::same(10.0))
+                                .show(ui, |ui| {
+                                    ui.label(
+                                        RichText::new(text)
+                                            .monospace()
+                                            .size(10.5)
+                                            .color(if ok {
+                                                Color32::from_rgb(240, 190, 145)
+                                            } else {
+                                                Color32::from_rgb(195, 198, 205)
+                                            }),
+                                    );
+                                });
+
+                            if ok {
+                                if let Ok(preview) = qemu_display_preview.lock() {
+                                    if let Some(image) = preview.as_ref() {
+                                        ui.add_space(8.0);
+                                        ui.label(
+                                            RichText::new("Real QEMU framebuffer preview")
+                                                .size(10.5)
+                                                .strong()
+                                                .color(Color32::from_rgb(180, 185, 195)),
+                                        );
+                                        let texture = ui.ctx().load_texture(
+                                            "cdj3k-diagnostics-qemu-shm-preview",
+                                            image.clone(),
+                                            egui::TextureOptions::LINEAR,
+                                        );
+                                        let max_w = 512.0;
+                                        let aspect =
+                                            image.size[1] as f32 / image.size[0].max(1) as f32;
+                                        ui.image((texture.id(), egui::vec2(max_w, max_w * aspect)));
+                                    }
+                                }
+                            }
+                        }
 
                         ui.add_space(8.0);
                         let display_snapshot = display_test.lock().unwrap().clone();
@@ -527,6 +623,136 @@ fn run_display_test(
     let mut state = test.lock().unwrap();
     state.running = false;
     state.result = Some(Ok("Synthetic Windows display pipeline test is Windows-only".to_string()));
+    drop(state);
+    ctx.request_repaint();
+}
+
+
+#[cfg(windows)]
+fn run_qemu_display_test(
+    test: Arc<Mutex<TestState>>,
+    preview: Arc<Mutex<Option<egui::ColorImage>>>,
+    ctx: Context,
+) {
+    {
+        let mut state = test.lock().unwrap();
+        state.running = true;
+        state.result = None;
+    }
+
+    std::thread::Builder::new()
+        .name("cdj3k-qemu-display-diagnostics".into())
+        .spawn(move || {
+            let result = run_qemu_display_test_inner(preview, ctx.clone());
+            {
+                let mut state = test.lock().unwrap();
+                state.running = false;
+                state.result = Some(result);
+            }
+            ctx.request_repaint();
+        })
+        .ok();
+}
+
+#[cfg(windows)]
+fn run_qemu_display_test_inner(
+    preview: Arc<Mutex<Option<egui::ColorImage>>>,
+    ctx: Context,
+) -> Result<String, String> {
+    use std::process::{Command, Stdio};
+    use std::thread;
+    use std::time::Duration;
+
+    let qemu = cdj3k_emu_runtime::external_qemu_exe()
+        .ok_or_else(|| "bundled qemu-system-aarch64.exe not found".to_string())?;
+
+    let dir = std::env::temp_dir().join("cdj3k-emu-qemu-displaytest");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("create {}: {e}", dir.display()))?;
+
+    let shm = dir.join("main.shm");
+    let log = dir.join("qemu-displaytest.log");
+    let stdout_file = std::fs::File::create(&log)
+        .map_err(|e| format!("create {}: {e}", log.display()))?;
+    let stderr_file = stdout_file
+        .try_clone()
+        .map_err(|e| format!("clone QEMU log handle: {e}"))?;
+
+    let display_arg = format!("shm,path={}", shm.display());
+    let argv = vec![
+        "-machine".to_string(), "virt".to_string(),
+        "-accel".to_string(), "tcg".to_string(),
+        "-cpu".to_string(), "cortex-a72".to_string(),
+        "-m".to_string(), "128".to_string(),
+        "-nodefaults".to_string(),
+        "-device".to_string(), "virtio-gpu-pci".to_string(),
+        "-display".to_string(), display_arg,
+        "-monitor".to_string(), "none".to_string(),
+        "-serial".to_string(), "none".to_string(),
+        "-S".to_string(),
+    ];
+
+    let mut child = Command::new(&qemu)
+        .args(&argv)
+        .stdout(Stdio::from(stdout_file))
+        .stderr(Stdio::from(stderr_file))
+        .spawn()
+        .map_err(|e| format!("spawn QEMU: {e}"))?;
+
+    thread::sleep(Duration::from_secs(2));
+
+    if let Ok(Some(status)) = child.try_wait() {
+        let qemu_log = std::fs::read_to_string(&log).unwrap_or_default();
+        return Err(format!("QEMU exited early with {status}\n{qemu_log}"));
+    }
+
+    let qemu_log = std::fs::read_to_string(&log).unwrap_or_default();
+    if qemu_log.contains("no graphic console found") || qemu_log.contains("console -1") {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(format!("QEMU did not create a valid graphics console\n{qemu_log}"));
+    }
+
+    let inspected =
+        cdj3k_emu_streams::main_stream::inspect_qemu_main_shm(ctx, &dir);
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let r = inspected?;
+    let expected = r.width as usize * r.height as usize * 4;
+    if r.preview_rgba.len() != expected {
+        return Err(format!(
+            "captured framebuffer size mismatch: {} bytes, expected {}",
+            r.preview_rgba.len(),
+            expected
+        ));
+    }
+
+    let image = egui::ColorImage::from_rgba_unmultiplied(
+        [r.width as usize, r.height as usize],
+        &r.preview_rgba,
+    );
+    if let Ok(mut slot) = preview.lock() {
+        *slot = Some(image);
+    }
+
+    Ok(format!(
+        "MainLcdStream connected: {}\nResolution: {}×{}\nStride: {} bytes\nGeneration: {}\nmain.shm size: {} bytes\nQEMU console: VALID\nVisible preview: READY",
+        r.connected, r.width, r.height, r.stride, r.generation, r.shm_bytes
+    ))
+}
+
+#[cfg(not(windows))]
+fn run_qemu_display_test(
+    test: Arc<Mutex<TestState>>,
+    _preview: Arc<Mutex<Option<egui::ColorImage>>>,
+    ctx: Context,
+) {
+    let mut state = test.lock().unwrap();
+    state.running = false;
+    state.result = Some(Ok("QEMU display integration test is Windows-only".to_string()));
     drop(state);
     ctx.request_repaint();
 }
