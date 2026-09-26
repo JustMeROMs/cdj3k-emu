@@ -23,6 +23,10 @@ pub struct DiagnosticsWindow {
     pub open: bool,
     test: Arc<Mutex<TestState>>,
     display_test: Arc<Mutex<TestState>>,
+    /// Captured framebuffer from the synthetic main.shm pipeline. Kept as a
+    /// ColorImage so the diagnostics viewport can upload it through egui's
+    /// texture manager and visibly render the same bytes the stream observed.
+    display_preview: Arc<Mutex<Option<egui::ColorImage>>>,
     focused_after_open: bool,
 }
 
@@ -32,6 +36,7 @@ impl DiagnosticsWindow {
             open: false,
             test: Arc::new(Mutex::new(TestState::default())),
             display_test: Arc::new(Mutex::new(TestState::default())),
+            display_preview: Arc::new(Mutex::new(None)),
             focused_after_open: false,
         }
     }
@@ -47,6 +52,7 @@ impl DiagnosticsWindow {
         let need_focus = !self.focused_after_open;
         let test = self.test.clone();
         let display_test = self.display_test.clone();
+        let display_preview = self.display_preview.clone();
 
         ctx.show_viewport_immediate(
             egui::ViewportId::from_hash_of("windows_system_diagnostics"),
@@ -135,7 +141,15 @@ impl DiagnosticsWindow {
                                 .add_enabled(!display_snapshot.running, run_display)
                                 .clicked()
                             {
-                                run_display_test(display_test.clone(), ctx.clone());
+                                // Clear the previous preview before a fresh run.
+                                if let Ok(mut preview) = display_preview.lock() {
+                                    *preview = None;
+                                }
+                                run_display_test(
+                                    display_test.clone(),
+                                    display_preview.clone(),
+                                    ctx.clone(),
+                                );
                             }
 
                             ui.label(
@@ -178,6 +192,36 @@ impl DiagnosticsWindow {
                                             }),
                                     );
                                 });
+                        }
+
+                        if display_ok {
+                            if let Ok(preview) = display_preview.lock() {
+                                if let Some(image) = preview.as_ref() {
+                                    ui.add_space(8.0);
+                                    ui.label(
+                                        RichText::new("Captured main.shm framebuffer preview")
+                                            .size(10.5)
+                                            .strong()
+                                            .color(Color32::from_rgb(180, 185, 195)),
+                                    );
+                                    let texture = ui.ctx().load_texture(
+                                        "cdj3k-diagnostics-main-shm-preview",
+                                        image.clone(),
+                                        egui::TextureOptions::LINEAR,
+                                    );
+                                    // Preserve 16:9 while fitting comfortably in the
+                                    // diagnostics viewport.
+                                    let preview_size = egui::vec2(512.0, 288.0);
+                                    ui.image((texture.id(), preview_size));
+                                    ui.label(
+                                        RichText::new(
+                                            "Visible texture is uploaded from the captured shared-memory framebuffer.",
+                                        )
+                                        .size(9.8)
+                                        .color(Color32::from_rgb(125, 135, 145)),
+                                    );
+                                }
+                            }
                         }
 
                         ui.add_space(12.0);
@@ -413,7 +457,11 @@ fn bundled_resources() -> std::path::PathBuf {
 
 
 #[cfg(windows)]
-fn run_display_test(test: Arc<Mutex<TestState>>, ctx: Context) {
+fn run_display_test(
+    test: Arc<Mutex<TestState>>,
+    preview: Arc<Mutex<Option<egui::ColorImage>>>,
+    ctx: Context,
+) {
     {
         let mut state = test.lock().unwrap();
         state.running = true;
@@ -426,17 +474,36 @@ fn run_display_test(test: Arc<Mutex<TestState>>, ctx: Context) {
             let result = match cdj3k_emu_streams::main_stream::run_synthetic_display_test(
                 ctx.clone(),
             ) {
-                Ok(r) => Ok(format!(
-                    "Resolution: {}×{}\nStride: {} bytes\nFrames observed: {}\nDirty notifications: {}\nElapsed: {} ms\nApprox reader FPS: {:.1}\nSample RGBA: {:?}",
-                    r.width,
-                    r.height,
-                    r.stride,
-                    r.frames_seen,
-                    r.dirty_notifications,
-                    r.duration_ms,
-                    r.approx_fps,
-                    r.sample_rgba
-                )),
+                Ok(r) => {
+                    let expected = r.width as usize * r.height as usize * 4;
+                    if r.preview_rgba.len() != expected {
+                        Err(format!(
+                            "Framebuffer capture size mismatch: {} bytes, expected {}",
+                            r.preview_rgba.len(),
+                            expected
+                        ))
+                    } else {
+                        let image = egui::ColorImage::from_rgba_unmultiplied(
+                            [r.width as usize, r.height as usize],
+                            &r.preview_rgba,
+                        );
+                        if let Ok(mut slot) = preview.lock() {
+                            *slot = Some(image);
+                        }
+
+                        Ok(format!(
+                            "Resolution: {}×{}\nStride: {} bytes\nFrames observed: {}\nDirty notifications: {}\nElapsed: {} ms\nApprox reader FPS: {:.1}\nSample RGBA: {:?}\nTexture preview: READY",
+                            r.width,
+                            r.height,
+                            r.stride,
+                            r.frames_seen,
+                            r.dirty_notifications,
+                            r.duration_ms,
+                            r.approx_fps,
+                            r.sample_rgba
+                        ))
+                    }
+                }
                 Err(e) => Err(e),
             };
             {
@@ -450,7 +517,11 @@ fn run_display_test(test: Arc<Mutex<TestState>>, ctx: Context) {
 }
 
 #[cfg(not(windows))]
-fn run_display_test(test: Arc<Mutex<TestState>>, ctx: Context) {
+fn run_display_test(
+    test: Arc<Mutex<TestState>>,
+    _preview: Arc<Mutex<Option<egui::ColorImage>>>,
+    ctx: Context,
+) {
     let mut state = test.lock().unwrap();
     state.running = false;
     state.result = Some(Ok("Synthetic Windows display pipeline test is Windows-only".to_string()));

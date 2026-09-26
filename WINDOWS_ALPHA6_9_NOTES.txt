@@ -1,0 +1,26 @@
+CDJ3K-EMU Windows Alpha 6.9 - Visible main.shm framebuffer preview
+
+Builds on the passing Alpha 6.8 synthetic shared-memory pipeline test.
+
+New behavior:
+- Run Display Test still generates 90 synthetic frames through main.shm.
+- The final 1280x720 RGBA framebuffer is copied from the same shared-memory
+  mapping consumed by MainLcdStream.
+- Diagnostics converts those bytes to egui::ColorImage.
+- egui uploads the image through its texture manager.
+- The System Diagnostics window renders a 512x288 visible preview.
+- PASS output now includes:
+    Texture preview: READY
+
+This validates:
+  synthetic framebuffer
+    -> main.shm
+    -> MainLcdStream / dirty generation observation
+    -> captured RGBA bytes
+    -> egui texture upload
+    -> visible diagnostics UI preview
+
+The preview is a captured final frame, not yet a continuously animated texture.
+Continuous native-GL dirty-rectangle rendering remains the next no-key step.
+
+No CDJ firmware or AES key is required.

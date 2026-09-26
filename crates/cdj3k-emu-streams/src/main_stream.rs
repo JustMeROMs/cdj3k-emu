@@ -311,6 +311,10 @@ pub struct SyntheticDisplayTestResult {
     pub duration_ms: u128,
     pub approx_fps: f64,
     pub sample_rgba: [u8; 4],
+    /// Full RGBA8888 framebuffer captured from the same shared-memory mapping
+    /// after the synthetic animation completes. Diagnostics uploads this to an
+    /// egui texture so the user can visually confirm the final UI texture path.
+    pub preview_rgba: Vec<u8>,
 }
 
 /// Exercise the same `main.shm` reader used by the real LCD path without
@@ -464,6 +468,13 @@ pub fn run_synthetic_display_test(ctx: egui::Context) -> Result<SyntheticDisplay
     mmap.flush().ok();
 
     let seconds = elapsed.as_secs_f64().max(0.001);
+
+    // Capture the exact RGBA framebuffer bytes from main.shm. This is not a
+    // separately generated preview: it is copied from the same mapping that
+    // MainLcdStream just consumed.
+    let preview_rgba =
+        mmap[SHM_PIXELS_OFFSET..SHM_PIXELS_OFFSET + STRIDE * H].to_vec();
+
     Ok(SyntheticDisplayTestResult {
         frames_seen,
         dirty_notifications,
@@ -473,5 +484,6 @@ pub fn run_synthetic_display_test(ctx: egui::Context) -> Result<SyntheticDisplay
         duration_ms: elapsed.as_millis(),
         approx_fps: frames_seen as f64 / seconds,
         sample_rgba: last_sample,
+        preview_rgba,
     })
 }
