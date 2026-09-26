@@ -1,0 +1,17 @@
+CDJ3K-EMU Windows Alpha 6.9.1
+
+Fixes Rust compiler error E0425:
+
+  cannot find value `display_ok` in this scope
+
+Cause:
+Alpha 6.9 calculated `display_ok` inside the display-result rendering block,
+then referenced it again later when deciding whether to show the captured
+framebuffer preview.
+
+Fix:
+The preview block now calculates its own by-reference status:
+
+  matches!(&display_snapshot.result, Some(Ok(_)))
+
+No QEMU, guest, firmware, framebuffer, or provisioning logic changed.

@@ -194,7 +194,9 @@ impl DiagnosticsWindow {
                                 });
                         }
 
-                        if display_ok {
+                        let display_preview_ok =
+                            matches!(&display_snapshot.result, Some(Ok(_)));
+                        if display_preview_ok {
                             if let Ok(preview) = display_preview.lock() {
                                 if let Some(image) = preview.as_ref() {
                                     ui.add_space(8.0);
